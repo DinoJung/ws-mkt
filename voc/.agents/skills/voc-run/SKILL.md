@@ -146,6 +146,4 @@ python3 -m pytest test_classify_voc.py -v
 | `HTTPError: 429` | Rate limit — wait 60s and retry (see `voc-classify` skill) |
 | Tests fail | Check `test_classify_voc.py` fixtures and markers |
 
----
-
-**마지막 수정:** 2026-03-10 | **Sub-skills:** voc-data-load, voc-classify, voc-result, voc-test | **Core Functions:** main(), _build_parser(), run_classification()
+<!-- Sub-skills: voc-data-load, voc-classify, voc-result, voc-test | Core Functions: main(), _build_parser(), run_classification() -->
