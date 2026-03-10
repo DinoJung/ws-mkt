@@ -20,6 +20,8 @@ Handle the result-writing stage of the VOC classification pipeline. This skill m
 - Maintaining all sheets in the workbook during output
 - Printing classification summary with category counts
 
+Reference: [`docs/voc-classification-workflow.md §2`](docs/voc-classification-workflow.md) "입력/출력 규칙" for I/O path rules and [`§6`](docs/voc-classification-workflow.md) "실행 순서" steps 6–8 for execution sequence.
+
 ## When to Activate
 
 Activate this skill when:

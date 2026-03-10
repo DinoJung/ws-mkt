@@ -19,6 +19,8 @@ Activate this skill to run comprehensive QA verification for the VOC classificat
 
 **목적 (Korean):** VOC 분류 파이프라인의 모든 테스트를 자동으로 실행하고 검증합니다. 규칙 기반 분류, LLM 제목 분류, 이미지 OCR 재분류, 그리고 API 에러 폴백 로직을 검증합니다.
 
+Reference: [`docs/voc-classification-workflow.md §8`](docs/voc-classification-workflow.md) "검증 체크리스트" for test execution procedures and [`§9`](docs/voc-classification-workflow.md) "장애 대응 메모" for 429 error and failure handling.
+
 ## When to Activate
 
 - After modifying `classify_voc.py` or test logic
@@ -144,7 +146,5 @@ pip install -r /home/ws-mkt/voc/requirements.txt
 # or
 pip install openpyxl
 ```
-
----
 
 **마지막 수정:** 2026-03-10 | **테스트 클래스:** TestVocClassifier | **통합 테스트 마커:** @pytest.mark.integration
