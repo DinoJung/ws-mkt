@@ -32,13 +32,15 @@ This balances cost (rules-first), accuracy (LLM), and comprehensiveness (image a
 
 ## Workflow
 
+Reference: See [`docs/voc-classification-workflow.md §3`](docs/voc-classification-workflow.md) for step-by-step details and [`§5`](docs/voc-classification-workflow.md) for category mappings.
+
 ### Step A: Rule-Based Classification (cost: $0)
 
 **Function:** `rule_classify(title: str) → str | None`
 
 Checks title against `EXCHANGE_KEYWORDS` and `SEEKING_KEYWORDS`:
-- If title contains `[교환]` or similar → return `반응_교환` immediately
-- If title contains `[구해요]` or similar → return `반응_구해요` immediately
+- If title contains `[교환]` or matches `EXCHANGE_KEYWORDS` → returns matching `VALID_CATEGORIES` value immediately
+- If title contains `[구해요]` or matches `SEEKING_KEYWORDS` → returns matching `VALID_CATEGORIES` value immediately
 - Otherwise → return `None` (proceed to Step B)
 
 **Cost:** No API calls. ~90% of routine posts match here.
@@ -101,6 +103,12 @@ Verify classification accuracy and pipeline behavior:
 3. **Full run:** Set `GITHUB_TOKEN` env var, then `python3 classify_voc.py input.xlsx`
 4. **Output check:** Verify `output/input.xlsx` column 7 contains only `VALID_CATEGORIES` values
 5. **Audit trail:** Check stderr logs for `[row] (method) → category` per item
+
+**Run tests with bash:**
+
+```bash
+python3 -m pytest test_classify_voc.py -v -k "rule or classify or llm"
+```
 
 **Success criteria:**
 - All 5 categories present in results
