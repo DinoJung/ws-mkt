@@ -38,7 +38,7 @@ cd /home/ws-mkt/voc
 python3 -m pytest test_classify_voc.py -v
 ```
 
-Runs all 18 tests (13 unit + 5 integration):
+Runs all 24 tests (19 unit + 5 integration):
 - `TestVocClassifier::test_rule_classify_*` — rule-based classification
 - `TestVocClassifier::test_github_gpt*_adapter_*` — API adapter format/parsing
 - `TestVocClassifier::test_classify_pipeline_with_mock_api` — full integration
@@ -92,12 +92,12 @@ Confirms HTTP errors trigger GPT-4.1 → GPT-4o retry mechanism.
 
 All tests pass with zero failures:
 ```
-collected 18 items
+collected 24 items
 test_classify_voc.py::TestVocClassifier::test_rule_classify_exchange PASSED
 test_classify_voc.py::TestVocClassifier::test_rule_classify_seeking PASSED
 ...
 test_classify_voc.py::test_hybrid_pipeline_integration PASSED
-=================== 18 passed in X.XXs ====================
+=================== 24 passed in X.XXs ====================
 ```
 
 ### Expected Test Behavior

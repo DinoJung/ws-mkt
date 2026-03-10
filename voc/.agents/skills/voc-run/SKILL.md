@@ -94,13 +94,13 @@ Expected: `output/<input-filename>` exists with updated classifications in colum
 
 **Sub-skill:** `voc-test`
 
-Run all 18 unit + integration tests to verify pipeline correctness:
+Run all 24 unit + integration tests to verify pipeline correctness:
 
 ```bash
 python3 -m pytest test_classify_voc.py -v
 ```
 
-Expected: `18 passed` with zero failures. Tests validate rule classification, API adapters, image encoding, and error fallback.
+Expected: `24 passed` with zero failures. Tests validate rule classification, API adapters, image encoding, and error fallback.
 
 ## Complete Pipeline Example
 
@@ -134,7 +134,7 @@ python3 -m pytest test_classify_voc.py -v
 1. **Dry-run succeeds:** Output shows `dry-run: N target rows` with N > 0
 2. **Classification completes:** No HTTP/timeout errors; classifications applied to column 7
 3. **Output file created:** `output/<input-filename>` present and readable
-4. **All tests pass:** `pytest` returns `18 passed in X.XXs`
+4. **All tests pass:** `pytest` returns `24 passed in X.XXs`
 5. **No console errors:** No `GITHUB_TOKEN` undefined, no module import errors
 
 ### Troubleshooting
