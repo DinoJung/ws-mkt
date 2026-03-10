@@ -75,7 +75,7 @@ Execute the hybrid classification pipeline:
 - Reference: [VOC Classification Workflow §3, §6](https://github.com/code-yeongyu/voc/blob/main/docs/voc-classification-workflow.md)
 
 ```bash
-python3 classify_voc.py /path/to/input.xlsx
+python3 classify_voc.py /path/to/input.xlsx [--output-dir output/]
 ```
 
 ### Step 4: Verify Output
