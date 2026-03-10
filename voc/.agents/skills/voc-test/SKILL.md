@@ -107,7 +107,7 @@ test_classify_voc.py::test_hybrid_pipeline_integration PASSED
 - **No real API calls** — all tests use mock (unittest.mock.patch)
 - **No GITHUB_TOKEN required** — mocks intercept urllib.request.urlopen
 - **Workbook mutations are in-memory** — original input not modified
-- **Fast execution** — all 18 tests complete in < 2 seconds
+- **Fast execution** — all 24 tests complete in < 5 seconds
 
 ## Troubleshooting
 

@@ -22,7 +22,7 @@ The `voc-run` skill activates the complete VOC classification pipeline orchestra
 3. **Executes dry-run** via `python3 classify_voc.py --dry-run <input.xlsx>` to validate data loading
 4. **Runs full classification** via `python3 classify_voc.py <input.xlsx>` with hybrid rule+LLM+image fallback
 5. **Verifies output** via `ls -la output/` to confirm result file generation
-6. **Runs regression tests** via `python3 -m pytest test_classify_voc.py -v` to ensure 18/18 tests pass
+6. **Runs regression tests** via `python3 -m pytest test_classify_voc.py -v` to ensure 24/24 tests pass
 
 This skill coordinates all four sub-skills (`voc-data-load`, `voc-classify`, `voc-result`, `voc-test`) into a single end-to-end execution.
 
