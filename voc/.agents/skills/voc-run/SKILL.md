@@ -19,8 +19,8 @@ The `voc-run` skill activates the complete VOC classification pipeline orchestra
 
 1. **Loads environment variables** via `set -a && . ./.env && set +a` to populate `GITHUB_TOKEN`
 2. **Validates dependencies** via `pip install -r requirements.txt`
-3. **Executes dry-run** via `python3 classify_voc.py --dry-run <input.xlsx>` to validate data loading
-4. **Runs full classification** via `python3 classify_voc.py <input.xlsx>` with hybrid rule+LLM+image fallback
+3. **Executes dry-run** via `python3 classify_voc.py --dry-run` (auto-detects xlsx from `input/` directory) to validate data loading
+4. **Runs full classification** via `python3 classify_voc.py` with hybrid rule+LLM+image fallback
 5. **Verifies output** via `ls -la output/` to confirm result file generation
 6. **Runs regression tests** via `python3 -m pytest test_classify_voc.py -v` to ensure 24/24 tests pass
 
@@ -57,10 +57,12 @@ This populates `GITHUB_TOKEN` (required by `run_classification()`).
 Validate that target rows are loaded correctly without making API calls:
 
 ```bash
-python3 classify_voc.py --dry-run /path/to/input.xlsx
+python3 classify_voc.py --dry-run
 ```
 
 Expected output: `dry-run: N target rows` (N > 0)
+
+The script auto-detects the xlsx file from the `input/` directory. You can also specify explicitly: `python3 classify_voc.py --dry-run input/file.xlsx`
 
 This invokes `_build_parser()` to register `--dry-run` flag and `main()` to dispatch.
 
@@ -75,7 +77,7 @@ Execute the hybrid classification pipeline:
 - Reference: [VOC Classification Workflow §3, §6](https://github.com/code-yeongyu/voc/blob/main/docs/voc-classification-workflow.md)
 
 ```bash
-python3 classify_voc.py /path/to/input.xlsx [--output-dir output/]
+python3 classify_voc.py [--output-dir output/]
 ```
 
 ### Step 4: Verify Output
@@ -115,10 +117,10 @@ set -a && . ./.env && set +a
 pip install -r requirements.txt
 
 # Step 3: Dry-run (data validation)
-python3 classify_voc.py --dry-run input.xlsx
+python3 classify_voc.py --dry-run
 
-# Step 4: Full classification
-python3 classify_voc.py input.xlsx
+# Step 4: Full classification (auto-detects xlsx from input/)
+python3 classify_voc.py
 
 # Step 5: Verify output
 ls -la output/

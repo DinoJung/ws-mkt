@@ -73,10 +73,12 @@ Run a dry-run to validate data loading without API calls:
 
 ```bash
 cd /home/ws-mkt/voc
-python3 classify_voc.py --dry-run /path/to/input.xlsx
+python3 classify_voc.py --dry-run
 ```
 
 Expected output: `dry-run: {N} target rows` where N > 0
+
+The script auto-detects the xlsx file from the `input/` directory. You can also specify explicitly: `python3 classify_voc.py --dry-run input/file.xlsx`
 
 For detailed inspection, load and print first target row:
 
@@ -84,7 +86,7 @@ For detailed inspection, load and print first target row:
 import openpyxl
 from classify_voc import read_target_rows, build_image_index
 
-wb = openpyxl.load_workbook("input.xlsx")
+wb = openpyxl.load_workbook("input/your_file.xlsx")
 targets = read_target_rows(wb)
 print(f"Found {len(targets)} targets")
 print(f"First: {targets[0]}")
