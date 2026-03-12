@@ -10,3 +10,5 @@ venv/
 
 voc/.env
 voc/.pytest_cache/
+voc/input/*.xlsx
+voc/output/*.xlsx
