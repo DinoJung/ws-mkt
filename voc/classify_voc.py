@@ -1,17 +1,23 @@
 """VOC classification script using GitHub Models API."""
+
 import argparse
 import base64
+import html
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
 import urllib.error
+import xml.etree.ElementTree as ET
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from zipfile import ZipFile
+from typing import Any, TypedDict
 
 import openpyxl
+from openpyxl.utils import get_column_letter
 
 
 VALID_CATEGORIES = {
@@ -29,13 +35,56 @@ LINK_COLUMN = 11
 START_ROW = 5
 END_ROW = 220
 
-EXCHANGE_KEYWORDS = ["[교환]", "교환원해", "교환 구해", "교환하실", "교환해주", "교환 원해"]
+EXCHANGE_KEYWORDS = [
+    "[교환]",
+    "교환원해",
+    "교환 구해",
+    "교환하실",
+    "교환해주",
+    "교환 원해",
+]
 SEEKING_KEYWORDS = [
-    "[구해요]", "구해요", "구해용", "구합니다", "구입하실분",
-    "구해봐", "구해보아요", "구매원해", "구매합니다", "구함",
+    "[구해요]",
+    "구해요",
+    "구해용",
+    "구합니다",
+    "구입하실분",
+    "구해봐",
+    "구해보아요",
+    "구매원해",
+    "구매합니다",
+    "구함",
+]
+INFO_KEYWORDS = [
+    "가격",
+    "무배",
+    "할인",
+    "세일",
+    "핫딜",
+    "리셀",
+    "발매",
+    "신상",
 ]
 
 REACTION_SHEETS = ["BP_반응", "PK_반응"]
+NOTICE_PHRASES = ("회원간의 거래 분쟁에 대한 공론화 금지",)
+XML_NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+XML_NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+XML_NS_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+
+ET.register_namespace("", XML_NS_MAIN)
+
+
+class TargetRow(TypedDict):
+    row: int
+    title: str
+    link: str
+
+
+class CellUpdate(TypedDict):
+    sheet_name: str
+    cell_ref: str
+    value: str
 
 
 def preprocess_title(text) -> str | None:
@@ -56,15 +105,15 @@ def build_classification_prompt(title) -> str:
         "카테고리 분류 기준:\n"
         "- 반응_교환: [교환] 태그, 교환 요청, 사이즈 교환, 교환 구해요\n"
         "- 반응_구해요: [구해요] 태그, 구해요, 구합니다, 구해용, 구입하실분, 판매처 문의\n"
-        "- 반응_문의: 궁금, 질문, 어디서 사나요, 사이즈 팁, 착샷 보여주세요, ~인가요?\n"
-        "- 반응_정보: 가격, 성분, 할인, 세일, 제품 스펙 공유\n"
+        "- 반응_문의: 직접 답변이나 조언을 요청하는 질문형 제목. 궁금, 질문, 어디서 사나요, ~인가요?, 있을까요?, 계신가요?\n"
+        "- 반응_정보: 가격, 성분, 할인, 세일, 무배, 핫딜, 리셀, 발매, 신상, 구매 정보나 경험 정보를 공유하는 제목\n"
         "- 반응_기타: 위 4개에 해당하지 않는 단순 감상, 후기, 추천, 비추천\n\n"
         "few-shot 예시:\n"
         '입력: "궁금합니다" -> 출력: 반응_문의\n'
         '입력: "어디서 사나요" -> 출력: 반응_문의\n'
+        '입력: "구매처 아시는분" -> 출력: 반응_문의\n'
         '입력: "판매처 아시는분" -> 출력: 반응_구해요\n'
-        '입력: "사이즈 팁이요" -> 출력: 반응_문의\n'
-        '입력: "착샷 좀 보여주세요" -> 출력: 반응_문의\n'
+        '입력: "불량 수선받으신 맘님 계신가요" -> 출력: 반응_문의\n'
         '입력: "[교환] 교환해주세요" -> 출력: 반응_교환\n'
         '입력: "스피드캣 교환원해요" -> 출력: 반응_교환\n'
         '입력: "[교환] 블랙150(저) > 140(맘님)" -> 출력: 반응_교환\n'
@@ -74,12 +123,34 @@ def build_classification_prompt(title) -> str:
         '입력: "구입하실분들" -> 출력: 반응_구해요\n'
         '입력: "가격이 얼마인가요" -> 출력: 반응_정보\n'
         '입력: "성분 정보" -> 출력: 반응_정보\n'
-        '입력: "2만원대부터! 할인도 있네요" -> 출력: 반응_정보\n'
+        '입력: "무신사 79000원 무배" -> 출력: 반응_정보\n'
+        '입력: "크림 리셀가 공유" -> 출력: 반응_정보\n'
+        '입력: "최대 80% 할인 핫딜" -> 출력: 반응_정보\n'
+        '입력: "신상 발매 정보" -> 출력: 반응_정보\n'
         '입력: "왕비추천" -> 출력: 반응_기타\n'
         '입력: "베베드피노 몬치치가방" -> 출력: 반응_기타\n\n'
         "중요: [교환] 또는 [구해요] 태그가 있으면 해당 카테고리로 분류하세요.\n"
+        "중요: 가격/세일/무배/리셀/핫딜/발매/신상처럼 정보를 공유하는 제목은 질문형 어미가 섞여도 반응_정보를 우선 검토하세요.\n"
         "반드시 카테고리 텍스트 하나만 출력하세요.\n"
         f"분류 대상 제목: {title}"
+    )
+
+
+def build_body_classification_prompt(text) -> str:
+    categories = "\n".join(f"- {item}" for item in sorted(VALID_CATEGORIES))
+    return (
+        "당신은 VOC 본문을 아래 5개 카테고리 중 하나로만 분류하는 분류기입니다.\n"
+        "카테고리 목록:\n"
+        f"{categories}\n\n"
+        "카테고리 기준:\n"
+        "- 반응_교환: 교환 요청, 사이즈 교환, 맞교환\n"
+        "- 반응_구해요: 구매 희망, 구합니다, 구해요, 판매처 수배\n"
+        "- 반응_문의: 직접 답변이나 조언을 구하는 질문\n"
+        "- 반응_정보: 가격, 할인, 무배, 리셀, 발매, 신상, 경험/상황 공유\n"
+        "- 반응_기타: 감상, 잡담, 단순 반응\n"
+        "본문에는 공지와 배너가 제거되어 있을 수 있습니다. 실제 게시글 본문 의미만 보고 분류하세요.\n"
+        "반드시 카테고리 텍스트 하나만 출력하세요.\n"
+        f"분류 대상 본문: {text}"
     )
 
 
@@ -93,7 +164,7 @@ def validate_result(text) -> str:
     return "반응_기타"
 
 
-def _request_json(url: str, body: dict, api_key: str) -> dict:
+def _request_json(url: str, body: dict[str, Any], api_key: str) -> dict[str, Any]:
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -112,9 +183,12 @@ def _request_json(url: str, body: dict, api_key: str) -> dict:
 class GithubModelsAdapter:
     endpoint = "https://models.github.ai/inference/chat/completions"
 
-    def __init__(self, api_key: str, model: str = "openai/gpt-4.1"):
+    def __init__(
+        self, api_key: str, model: str = "openai/gpt-4.1", prompt_builder=None
+    ):
         self.api_key = api_key
         self.model = model
+        self.prompt_builder = prompt_builder or build_classification_prompt
 
     def build_request_body(self, title):
         return {
@@ -122,7 +196,7 @@ class GithubModelsAdapter:
             "messages": [
                 {
                     "role": "system",
-                    "content": build_classification_prompt(title),
+                    "content": self.prompt_builder(title),
                 },
                 {
                     "role": "user",
@@ -163,6 +237,11 @@ def rule_classify(title: str) -> str | None:
     for kw in SEEKING_KEYWORDS:
         if kw.lower() in lower:
             return "반응_구해요"
+    if re.search(r"\b\d[\d,]*원\b", title):
+        return "반응_정보"
+    for kw in INFO_KEYWORDS:
+        if kw.lower() in lower:
+            return "반응_정보"
     return None
 
 
@@ -229,7 +308,9 @@ def build_image_index(wb) -> dict[str, list[bytes]]:
             if not link:
                 continue
 
-            next_card_start = card_starts[idx + 1] if idx + 1 < len(card_starts) else None
+            next_card_start = (
+                card_starts[idx + 1] if idx + 1 < len(card_starts) else None
+            )
             body_images: list[tuple[int, int, bytes]] = []
             for img in images:
                 col, row = _image_anchor_col_row(img)
@@ -251,7 +332,9 @@ def build_image_index(wb) -> dict[str, list[bytes]]:
     return index
 
 
-def _build_vision_request_body(model: str, image_bytes_list: list[bytes]) -> dict[str, Any]:
+def _build_vision_request_body(
+    model: str, image_bytes_list: list[bytes]
+) -> dict[str, Any]:
     images = [
         {
             "type": "image_url",
@@ -286,7 +369,9 @@ def _build_vision_request_body(model: str, image_bytes_list: list[bytes]) -> dic
     }
 
 
-def _classify_with_image_model(image_bytes_list: list[bytes], api_key: str, model: str) -> str | None:
+def _classify_with_image_model(
+    image_bytes_list: list[bytes], api_key: str, model: str
+) -> str | None:
     adapter = GithubModelsAdapter(api_key=api_key, model=model)
     backoff = 1
     for attempt in range(3):
@@ -316,6 +401,137 @@ def classify_with_image(image_bytes_list: list[bytes], api_key: str) -> str | No
     return _classify_with_image_model(image_bytes_list, api_key, "openai/gpt-4o")
 
 
+def _fetch_text(url: str) -> str | None:
+    if not url:
+        return None
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "voc-classifier/1.0",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = resp.read()
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
+        return None
+
+    if not data:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("utf-8", errors="ignore")
+
+
+def extract_article_text(html_text: str) -> str | None:
+    if not html_text:
+        return None
+
+    container_html = html_text
+    selectors = (
+        r"<(?P<tag>[a-zA-Z0-9]+)[^>]*class=[\"'][^\"']*\barticle\b[^\"']*\bviewer\b[^\"']*[\"'][^>]*>(?P<content>.*?)</(?P=tag)>",
+        r"<(?P<tag>[a-zA-Z0-9]+)[^>]*class=[\"'][^\"']*\bviewer\b[^\"']*\barticle\b[^\"']*[\"'][^>]*>(?P<content>.*?)</(?P=tag)>",
+        r"<(?P<tag>[a-zA-Z0-9]+)[^>]*class=[\"'][^\"']*\bartice\b[^\"']*\bviewer\b[^\"']*[\"'][^>]*>(?P<content>.*?)</(?P=tag)>",
+        r"<(?P<tag>[a-zA-Z0-9]+)[^>]*class=[\"'][^\"']*\bviewer\b[^\"']*\bartice\b[^\"']*[\"'][^>]*>(?P<content>.*?)</(?P=tag)>",
+    )
+    for pattern in selectors:
+        match = re.search(pattern, html_text, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            container_html = match.group("content")
+            break
+
+    container_html = re.sub(
+        r"<(script|style|noscript)\b[^>]*>.*?</\1>",
+        " ",
+        container_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    for phrase in NOTICE_PHRASES:
+        container_html = re.sub(
+            rf"<[^>]+>[^<]*{re.escape(phrase)}[^<]*</[^>]+>",
+            " ",
+            container_html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        container_html = container_html.replace(phrase, " ")
+
+    text = re.sub(r"<[^>]+>", "\n", container_html)
+    text = html.unescape(text)
+    text = re.sub(r"\n+", "\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    cleaned = text.strip()
+    return cleaned or None
+
+
+def classify_article_text(text: str, api_key: str) -> str | None:
+    primary_result = _classify_with_adapter(
+        GithubModelsAdapter(
+            api_key=api_key,
+            model="openai/gpt-4.1",
+            prompt_builder=build_body_classification_prompt,
+        ),
+        text,
+    )
+    if primary_result is not None:
+        return primary_result
+    return _classify_with_adapter(
+        GithubModelsAdapter(
+            api_key=api_key,
+            model="openai/gpt-4o",
+            prompt_builder=build_body_classification_prompt,
+        ),
+        text,
+    )
+
+
+def classify_from_article(link: str | None, api_key: str) -> str | None:
+    if not link:
+        return None
+    html = _fetch_text(link)
+    if html is None:
+        return None
+    text = extract_article_text(html)
+    if text is None:
+        return None
+    return classify_article_text(text, api_key)
+
+
+def build_card_index(wb) -> dict[str, list[tuple[str, int, int]]]:
+    index: dict[str, list[tuple[str, int, int]]] = {}
+    for ws in wb.worksheets:
+        card_starts: list[int] = []
+        for col in range(1, ws.max_column + 1):
+            value = ws.cell(2, col).value
+            if value == "Voice Of Customer":
+                card_starts.append(col)
+
+        for card_start in card_starts:
+            link = _extract_link_text(ws.cell(4, card_start + 4))
+            if not link:
+                continue
+            if ws.cell(5, card_start).value != "주요 이슈":
+                continue
+            index.setdefault(link, []).append((ws.title, 5, card_start + 1))
+    return index
+
+
+def write_linked_classification_results(
+    wb,
+    link: str | None,
+    category: str,
+    card_index: dict[str, list[tuple[str, int, int]]] | None,
+):
+    if not link or not card_index:
+        return
+
+    for sheet_name, row, col in card_index.get(link, []):
+        ws = wb[sheet_name]
+        ws.cell(row, col).value = validate_result(category)
+
+
 def _classify_item_with_method(
     title,
     link: str | None,
@@ -336,13 +552,18 @@ def _classify_item_with_method(
     if primary_result is not None and primary_result != "반응_기타":
         return primary_result, "llm"
 
+    if primary_result == "반응_기타" and link:
+        article_result = classify_from_article(link, api_key)
+        if article_result is not None and article_result != "반응_기타":
+            return article_result, "article"
+
     if primary_result == "반응_기타" and link and image_index and image_index.get(link):
         image_result = classify_with_image(image_index[link], api_key)
         if image_result is not None:
             return image_result, "image"
 
     if primary_result == "반응_기타":
-        return "반응_기타", "llm"
+        return "반응_기타", "article"
 
     fallback_result = _classify_with_adapter(
         GithubModelsAdapter(api_key=api_key, model="openai/gpt-4o"), cleaned
@@ -366,7 +587,7 @@ def classify_title(title, api_key) -> str:
     return classify_item(title, link=None, image_index=None, api_key=api_key)
 
 
-def read_target_rows(wb) -> list[dict]:
+def read_target_rows(wb) -> list[TargetRow]:
     ws = wb[TARGET_SHEET]
     targets = []
     for row in range(START_ROW, END_ROW + 1):
@@ -384,6 +605,181 @@ def read_target_rows(wb) -> list[dict]:
 def write_classification_result(wb, row, category):
     ws = wb[TARGET_SHEET]
     ws.cell(row, TARGET_COLUMN).value = validate_result(category)
+
+
+def _cell_ref(row: int, col: int) -> str:
+    return f"{get_column_letter(col)}{row}"
+
+
+def _split_cell_ref(cell_ref: str) -> tuple[int, str]:
+    match = re.fullmatch(r"([A-Z]+)(\d+)", cell_ref)
+    if match is None:
+        raise ValueError(f"invalid cell reference: {cell_ref}")
+    return int(match.group(2)), match.group(1)
+
+
+def _build_sheet_updates(
+    row: int,
+    link: str | None,
+    category: str,
+    card_index: dict[str, list[tuple[str, int, int]]] | None,
+) -> list[CellUpdate]:
+    updates: list[CellUpdate] = [
+        {
+            "sheet_name": TARGET_SHEET,
+            "cell_ref": _cell_ref(row, TARGET_COLUMN),
+            "value": validate_result(category),
+        }
+    ]
+    if not link or not card_index:
+        return updates
+
+    for sheet_name, card_row, card_col in card_index.get(link, []):
+        updates.append(
+            {
+                "sheet_name": sheet_name,
+                "cell_ref": _cell_ref(card_row, card_col),
+                "value": validate_result(category),
+            }
+        )
+    return updates
+
+
+def _apply_updates_to_workbook(wb, updates: list[CellUpdate]):
+    for update in updates:
+        ws = wb[update["sheet_name"]]
+        ws[update["cell_ref"]] = update["value"]
+
+
+def _sheet_xml_paths(zf: ZipFile) -> dict[str, str]:
+    workbook = ET.fromstring(zf.read("xl/workbook.xml"))
+    rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+
+    rel_map: dict[str, str] = {}
+    for rel in rels:
+        rel_id = rel.attrib.get("Id")
+        target = rel.attrib.get("Target")
+        if rel_id and target:
+            rel_map[rel_id] = target
+
+    sheet_paths: dict[str, str] = {}
+    for sheet in workbook.findall(f".//{{{XML_NS_MAIN}}}sheet"):
+        sheet_name = sheet.attrib.get("name")
+        rel_id = sheet.attrib.get(f"{{{XML_NS_REL}}}id")
+        if not sheet_name or not rel_id or rel_id not in rel_map:
+            continue
+        target = rel_map[rel_id].lstrip("/")
+        if not target.startswith("xl/"):
+            target = f"xl/{target}"
+        sheet_paths[sheet_name] = target
+    return sheet_paths
+
+
+def _set_inline_string(cell: ET.Element, value: str):
+    for child in list(cell):
+        if child.tag in {f"{{{XML_NS_MAIN}}}v", f"{{{XML_NS_MAIN}}}is"}:
+            cell.remove(child)
+    cell.set("t", "inlineStr")
+    is_elem = ET.SubElement(cell, f"{{{XML_NS_MAIN}}}is")
+    text_elem = ET.SubElement(is_elem, f"{{{XML_NS_MAIN}}}t")
+    text_elem.text = value
+    if value != value.strip() or "\n" in value:
+        text_elem.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+
+
+def _patch_sheet_xml(xml_bytes: bytes, updates: dict[str, str]) -> bytes:
+    root = ET.fromstring(xml_bytes)
+    sheet_data = root.find(f"{{{XML_NS_MAIN}}}sheetData")
+    if sheet_data is None:
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    rows: dict[int, ET.Element] = {}
+    cells: dict[str, ET.Element] = {}
+    for row in sheet_data.findall(f"{{{XML_NS_MAIN}}}row"):
+        row_ref = row.attrib.get("r")
+        if row_ref and row_ref.isdigit():
+            rows[int(row_ref)] = row
+        for cell in row.findall(f"{{{XML_NS_MAIN}}}c"):
+            cell_ref = cell.attrib.get("r")
+            if cell_ref:
+                cells[cell_ref] = cell
+
+    for cell_ref, value in updates.items():
+        cell = cells.get(cell_ref)
+        if cell is None:
+            row_number, _ = _split_cell_ref(cell_ref)
+            row = rows.get(row_number)
+            if row is None:
+                row = ET.SubElement(
+                    sheet_data, f"{{{XML_NS_MAIN}}}row", {"r": str(row_number)}
+                )
+                rows[row_number] = row
+            cell = ET.SubElement(row, f"{{{XML_NS_MAIN}}}c", {"r": cell_ref})
+            cells[cell_ref] = cell
+
+        if cell.find(f"{{{XML_NS_MAIN}}}f") is not None:
+            continue
+        _set_inline_string(cell, value)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def save_workbook_with_preserved_media(
+    source_path: Path, output_path: Path, updates: list[CellUpdate]
+):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    by_sheet: dict[str, dict[str, str]] = {}
+    for update in updates:
+        by_sheet.setdefault(update["sheet_name"], {})[update["cell_ref"]] = update[
+            "value"
+        ]
+
+    with ZipFile(source_path, "r") as source_zip:
+        sheet_paths = _sheet_xml_paths(source_zip)
+        patched_entries: dict[str, bytes] = {}
+        for sheet_name, sheet_updates in by_sheet.items():
+            sheet_path = sheet_paths.get(sheet_name)
+            if not sheet_path:
+                continue
+            patched_entries[sheet_path] = _patch_sheet_xml(
+                source_zip.read(sheet_path), sheet_updates
+            )
+
+        with ZipFile(output_path, "w") as out_zip:
+            out_zip.comment = source_zip.comment
+            for item in source_zip.infolist():
+                data = patched_entries.get(item.filename)
+                if data is None:
+                    data = source_zip.read(item.filename)
+                out_zip.writestr(item, data)
+
+
+def collect_classification_updates(
+    wb, api_key
+) -> tuple[list[CellUpdate], dict[str, int]]:
+    _prebuffer_workbook_images(wb)
+    image_index = build_image_index(wb)
+    card_index = build_card_index(wb)
+    targets = read_target_rows(wb)
+    summary = {category: 0 for category in sorted(VALID_CATEGORIES)}
+    updates: list[CellUpdate] = []
+
+    total = len(targets)
+    for idx, item in enumerate(targets, start=1):
+        category, method = _classify_item_with_method(
+            item["title"],
+            item.get("link"),
+            image_index,
+            api_key,
+        )
+        updates.extend(
+            _build_sheet_updates(item["row"], item.get("link"), category, card_index)
+        )
+        summary[category] += 1
+        print(
+            f"[{idx}/{total}] row={item['row']} ({method}) -> {category}",
+            file=sys.stderr,
+        )
+    return updates, summary
 
 
 def _prebuffer_workbook_images(wb):
@@ -408,27 +804,14 @@ def _refresh_image_refs(wb):
                 img.ref = BytesIO(cached)
 
 
-def run_classification(wb, api_key, output_path):
-    _prebuffer_workbook_images(wb)
-    image_index = build_image_index(wb)
-    targets = read_target_rows(wb)
-    summary = {category: 0 for category in sorted(VALID_CATEGORIES)}
-
-    total = len(targets)
-    for idx, item in enumerate(targets, start=1):
-        category, method = _classify_item_with_method(
-            item["title"],
-            item.get("link"),
-            image_index,
-            api_key,
-        )
-        write_classification_result(wb, item["row"], category)
-        summary[category] += 1
-        print(f"[{idx}/{total}] row={item['row']} ({method}) -> {category}", file=sys.stderr)
+def run_classification(wb, api_key, output_path, source_path: Path | None = None):
+    updates, summary = collect_classification_updates(wb, api_key)
+    _apply_updates_to_workbook(wb, updates)
 
     if output_path:
-        _refresh_image_refs(wb)
-        wb.save(output_path)
+        if source_path is None:
+            raise ValueError("source_path is required when output_path is provided")
+        save_workbook_with_preserved_media(source_path, Path(output_path), updates)
 
     print("분류 완료 요약")
     for key in sorted(summary):
@@ -436,8 +819,10 @@ def run_classification(wb, api_key, output_path):
     return summary
 
 
-def classify_workbook(wb, api_key, output_path):
-    return run_classification(wb, api_key=api_key, output_path=output_path)
+def classify_workbook(wb, api_key, output_path, source_path: Path | None = None):
+    return run_classification(
+        wb, api_key=api_key, output_path=output_path, source_path=source_path
+    )
 
 
 INPUT_DIR = Path("input")
@@ -455,7 +840,9 @@ def _find_input_xlsx() -> Path | None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="VOC workbook classifier")
-    parser.add_argument("input", nargs="?", help="Input xlsx path (default: auto-detect from input/)")
+    parser.add_argument(
+        "input", nargs="?", help="Input xlsx path (default: auto-detect from input/)"
+    )
     parser.add_argument("--output-dir", default="output/", help="Output directory")
     parser.add_argument("--dry-run", action="store_true", help="Skip API call")
     return parser
@@ -494,7 +881,9 @@ def main(argv=None) -> int:
         print(f"dry-run: {len(targets)} target rows")
         return 0
 
-    run_classification(wb, api_key=api_key, output_path=output_path)
+    run_classification(
+        wb, api_key=api_key, output_path=output_path, source_path=input_path
+    )
     return 0
 
 

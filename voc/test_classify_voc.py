@@ -1,9 +1,14 @@
 """RED-phase tests for VOC classification script."""
+
 # pyright: reportMissingImports=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
 import json
+from pathlib import Path
+import tempfile
 import unittest
+from typing import Any
 from unittest.mock import patch, MagicMock
 from io import BytesIO
+from zipfile import ZipFile
 
 import openpyxl
 import pytest
@@ -27,9 +32,20 @@ def _build_base_workbook():
     return wb, ws
 
 
+def _add_card(ws, start_col, link, category="반응_제품반응"):
+    ws.cell(2, start_col).value = "Voice Of Customer"
+    ws.cell(4, start_col).value = "사이트"
+    ws.cell(4, start_col + 3).value = "링크"
+    ws.cell(4, start_col + 4).value = link
+    ws.cell(5, start_col).value = "주요 이슈"
+    ws.cell(5, start_col + 1).value = category
+
+
 def _mock_http_response(payload):
     response = MagicMock()
-    response.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")
+    response.__enter__.return_value.read.return_value = json.dumps(payload).encode(
+        "utf-8"
+    )
     return response
 
 
@@ -39,7 +55,23 @@ def _http_error(url):
 
 
 def _pipeline_callable(module):
-    return getattr(module, "run_classification", None) or getattr(module, "classify_workbook", None)
+    return getattr(module, "run_classification", None) or getattr(
+        module, "classify_workbook", None
+    )
+
+
+def _real_input_workbook() -> Path:
+    path = Path("input/2026더캐리VOC(리포트파일)_260309~260315.xlsx")
+    if not path.exists():
+        pytest.skip("real input workbook not available")
+    return path
+
+
+def _xlsx_part_counts(path: Path) -> tuple[int, int]:
+    with ZipFile(path) as zf:
+        media = [name for name in zf.namelist() if name.startswith("xl/media/")]
+        drawings = [name for name in zf.namelist() if name.startswith("xl/drawings/")]
+    return len(media), len(drawings)
 
 
 class TestVocClassifier(unittest.TestCase):
@@ -58,18 +90,52 @@ class TestVocClassifier(unittest.TestCase):
 
         assert classify_voc.rule_classify("오늘 배송 빠르네요") is None
 
+    def test_rule_classify_info_keywords(self):
+        import classify_voc
+
+        assert (
+            classify_voc.rule_classify(
+                "무신사) 푸마 키즈 스피드캣 발렛 키즈 79000원 무배"
+            )
+            == "반응_정보"
+        )
+        assert classify_voc.rule_classify("캐리마켓 최대 80% 할인 핫딜") == "반응_정보"
+
+    def test_rule_classify_info_price_pattern_only(self):
+        import classify_voc
+
+        assert classify_voc.rule_classify("캐리마켓 14,310원 핫딜") == "반응_정보"
+        assert classify_voc.rule_classify("원픽이긴 한데 구매처 아시는분") is None
+
+    def test_rule_priority_keeps_seeking_before_info(self):
+        import classify_voc
+
+        assert (
+            classify_voc.rule_classify("[구해요] 150 구해요 79,000원") == "반응_구해요"
+        )
+
+    def test_rule_classify_does_not_turn_purchase_question_into_info(self):
+        import classify_voc
+
+        assert classify_voc.rule_classify("푸마 스피드캣 고 구매처 아시는분 ㅜ") is None
+
     def test_build_classification_prompt(self):
         import classify_voc
 
         prompt = classify_voc.build_classification_prompt("이 제품 어디서 구매하나요")
         for category in VALID_CATEGORIES:
             assert category in prompt
-        assert any(token in prompt for token in ["궁금", "교환", "구해", "가격", "성분"])
+        assert any(
+            token in prompt for token in ["궁금", "교환", "구해", "가격", "성분"]
+        )
+        assert any(token in prompt for token in ["무배", "리셀", "핫딜", "신상"])
 
     def test_github_gpt41_adapter_request_format(self):
         import classify_voc
 
-        adapter = classify_voc.GithubModelsAdapter(api_key="test-key", model="openai/gpt-4.1")
+        adapter = classify_voc.GithubModelsAdapter(
+            api_key="test-key", model="openai/gpt-4.1"
+        )
         body = adapter.build_request_body("테스트 제목")
 
         assert body["model"] == "openai/gpt-4.1"
@@ -80,7 +146,9 @@ class TestVocClassifier(unittest.TestCase):
     def test_github_gpt41_adapter_parse_response(self):
         import classify_voc
 
-        adapter = classify_voc.GithubModelsAdapter(api_key="test-key", model="openai/gpt-4.1")
+        adapter = classify_voc.GithubModelsAdapter(
+            api_key="test-key", model="openai/gpt-4.1"
+        )
         mock_response = {"choices": [{"message": {"content": "반응_문의"}}]}
 
         result = adapter.parse_response(mock_response)
@@ -89,7 +157,9 @@ class TestVocClassifier(unittest.TestCase):
     def test_github_gpt4o_adapter_request_format(self):
         import classify_voc
 
-        adapter = classify_voc.GithubModelsAdapter(api_key="test-key", model="openai/gpt-4o")
+        adapter = classify_voc.GithubModelsAdapter(
+            api_key="test-key", model="openai/gpt-4o"
+        )
         body = adapter.build_request_body("테스트 제목")
 
         assert body["model"] == "openai/gpt-4o"
@@ -98,7 +168,9 @@ class TestVocClassifier(unittest.TestCase):
     def test_github_gpt4o_adapter_parse_response(self):
         import classify_voc
 
-        adapter = classify_voc.GithubModelsAdapter(api_key="test-key", model="openai/gpt-4o")
+        adapter = classify_voc.GithubModelsAdapter(
+            api_key="test-key", model="openai/gpt-4o"
+        )
         mock_response = {"choices": [{"message": {"content": "반응_교환"}}]}
 
         result = adapter.parse_response(mock_response)
@@ -142,6 +214,66 @@ class TestVocClassifier(unittest.TestCase):
         wb, _ = _build_base_workbook()
         assert classify_voc.build_image_index(wb) == {}
 
+    def test_build_card_index_includes_duplicate_links(self):
+        import classify_voc
+
+        wb, _ = _build_base_workbook()
+        ws1 = wb.create_sheet("IB")
+        ws2 = wb.create_sheet("KR")
+        link = "https://example.com/post/1"
+        _add_card(ws1, 2, link)
+        _add_card(ws2, 14, link)
+
+        card_index = classify_voc.build_card_index(wb)
+
+        assert link in card_index
+        assert len(card_index[link]) == 2
+
+    def test_extract_article_text_removes_notice(self):
+        import classify_voc
+
+        html = """
+        <div class="article viewer">
+          <p>회원간의 거래 분쟁에 대한 공론화 금지</p>
+          <p>가격이 얼마인가요?</p>
+        </div>
+        """
+
+        text = classify_voc.extract_article_text(html)
+
+        assert text is not None
+        assert "회원간의 거래 분쟁에 대한 공론화 금지" not in text
+        assert "가격이 얼마인가요?" in text
+
+    def test_extract_article_text_supports_reversed_class_order(self):
+        import classify_voc
+
+        html = """
+        <div class="viewer article">
+          <p>사이즈가 궁금해요</p>
+        </div>
+        """
+
+        text = classify_voc.extract_article_text(html)
+
+        assert text == "사이즈가 궁금해요"
+
+    def test_patch_sheet_xml_creates_missing_cell(self):
+        import classify_voc
+
+        xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <sheetData>
+            <row r="5"></row>
+          </sheetData>
+        </worksheet>
+        """
+
+        patched = classify_voc._patch_sheet_xml(xml, {"G5": "반응_문의"})
+
+        assert b'c r="G5"' in patched
+        assert b't="inlineStr"' in patched
+
     @patch("classify_voc.urllib.request.urlopen")
     def test_classify_item_rule_bypasses_api(self, mock_urlopen):
         import classify_voc
@@ -163,6 +295,10 @@ class TestVocClassifier(unittest.TestCase):
         image_index = {"https://example.com/post/1": [b"image-a", b"image-b"]}
 
         def side_effect(request, *args, **kwargs):
+            if request.data is None:
+                response = MagicMock()
+                response.__enter__.return_value.read.return_value = b"<html></html>"
+                return response
             body = json.loads(request.data.decode())
             user_content = body["messages"][1]["content"]
             if isinstance(user_content, str):
@@ -183,10 +319,53 @@ class TestVocClassifier(unittest.TestCase):
         assert result == "반응_구해요"
 
     @patch("classify_voc.urllib.request.urlopen")
+    def test_classify_item_llm_then_article_body(self, mock_urlopen):
+        import classify_voc
+
+        html = """
+        <div class="article viewer">
+          <p>회원간의 거래 분쟁에 대한 공론화 금지</p>
+          <p>가격이 얼마인가요?</p>
+        </div>
+        """
+
+        def side_effect(request, *args, **kwargs):
+            if isinstance(request, str):
+                response = MagicMock()
+                response.__enter__.return_value.read.return_value = html.encode("utf-8")
+                return response
+
+            if request.data is None:
+                response = MagicMock()
+                response.__enter__.return_value.read.return_value = html.encode("utf-8")
+                return response
+
+            body = json.loads(request.data.decode())
+            prompt = body["messages"][0]["content"]
+            if "분류 대상 본문" in prompt:
+                return _mock_http_response(
+                    {"choices": [{"message": {"content": "반응_정보"}}]}
+                )
+            return _mock_http_response(
+                {"choices": [{"message": {"content": "반응_기타"}}]}
+            )
+
+        mock_urlopen.side_effect = side_effect
+
+        result = classify_voc.classify_item(
+            "애매한 제목",
+            link="https://example.com/post/1",
+            image_index={},
+            api_key="test-key",
+        )
+
+        assert result == "반응_정보"
+
+    @patch("classify_voc.urllib.request.urlopen")
     def test_classify_with_image_format(self, mock_urlopen):
         import classify_voc
 
-        captured: dict = {}
+        captured: dict[str, Any] = {}
 
         def side_effect(request, *args, **kwargs):
             captured.update(json.loads(request.data.decode()))
@@ -233,11 +412,7 @@ class TestVocClassifier(unittest.TestCase):
                 raise _http_error(request.full_url)
             if body.get("model") == "openai/gpt-4o":
                 return _mock_http_response(
-                    {
-                        "choices": [
-                            {"message": {"content": "반응_정보"}}
-                        ]
-                    }
+                    {"choices": [{"message": {"content": "반응_정보"}}]}
                 )
             raise AssertionError(f"unexpected model: {body.get('model')}")
 
@@ -339,7 +514,9 @@ def test_output_preserves_all_sheets(mock_urlopen):
     ws3 = wb.create_sheet("Sheet3")
     ws3.cell(2, 2).value = "keep-too"
 
-    mock_urlopen.return_value = _mock_http_response({"choices": [{"message": {"content": "반응_문의"}}]})
+    mock_urlopen.return_value = _mock_http_response(
+        {"choices": [{"message": {"content": "반응_문의"}}]}
+    )
     pipeline = _pipeline_callable(classify_voc)
     assert pipeline is not None
     pipeline(wb, api_key="test-key", output_path=None)
@@ -347,6 +524,34 @@ def test_output_preserves_all_sheets(mock_urlopen):
     assert wb.sheetnames == ["2026 list", "Sheet2", "Sheet3"]
     assert wb["Sheet2"].cell(1, 1).value == "keep"
     assert wb["Sheet3"].cell(2, 2).value == "keep-too"
+
+
+@pytest.mark.integration
+@patch("classify_voc.urllib.request.urlopen")
+def test_pipeline_updates_linked_cards(mock_urlopen):
+    import classify_voc
+
+    wb, ws = _build_base_workbook()
+    ws.cell(5, 7).value = "반응_제품반응"
+    ws.cell(5, 10).value = "어디서 구매"
+    ws.cell(5, 11).value = "원문"
+    ws.cell(5, 11).hyperlink = "https://example.com/post/5"
+
+    card_sheet = wb.create_sheet("IB")
+    _add_card(card_sheet, 2, "https://example.com/post/5")
+    _add_card(card_sheet, 14, "https://example.com/post/5")
+
+    mock_urlopen.return_value = _mock_http_response(
+        {"choices": [{"message": {"content": "반응_문의"}}]}
+    )
+
+    pipeline = _pipeline_callable(classify_voc)
+    assert pipeline is not None
+    pipeline(wb, api_key="test-key", output_path=None)
+
+    assert ws.cell(5, 7).value == "반응_문의"
+    assert card_sheet.cell(5, 3).value == "반응_문의"
+    assert card_sheet.cell(5, 15).value == "반응_문의"
 
 
 @pytest.mark.integration
@@ -362,7 +567,9 @@ def test_classification_summary(mock_urlopen, capsys):
     ws.cell(7, 7).value = "반응_제품반응"
     ws.cell(7, 10).value = "제목3"
 
-    mock_urlopen.return_value = _mock_http_response({"choices": [{"message": {"content": "반응_문의"}}]})
+    mock_urlopen.return_value = _mock_http_response(
+        {"choices": [{"message": {"content": "반응_문의"}}]}
+    )
     pipeline = _pipeline_callable(classify_voc)
     assert pipeline is not None
     pipeline(wb, api_key="test-key", output_path=None)
@@ -423,4 +630,107 @@ def test_hybrid_pipeline_integration(mock_urlopen):
 
     assert ws.cell(5, 7).value == "반응_교환"
     assert ws.cell(6, 7).value == "반응_정보"
-    assert mock_urlopen.call_count == 1
+    assert mock_urlopen.call_count == 0
+
+
+@pytest.mark.integration
+def test_openpyxl_roundtrip_drops_media_on_real_workbook():
+    src = _real_input_workbook()
+    before_media, before_drawings = _xlsx_part_counts(src)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / "roundtrip.xlsx"
+        wb = openpyxl.load_workbook(src)
+        wb.save(out)
+
+        after_media, after_drawings = _xlsx_part_counts(out)
+
+    assert after_media < before_media
+    assert after_drawings < before_drawings
+
+
+@pytest.mark.integration
+@patch("classify_voc.urllib.request.urlopen")
+def test_saved_output_preserves_media_on_real_workbook(mock_urlopen):
+    import classify_voc
+
+    src = _real_input_workbook()
+    before_media, before_drawings = _xlsx_part_counts(src)
+    out = Path(tempfile.mkdtemp()) / src.name
+
+    mock_urlopen.return_value = _mock_http_response(
+        {"choices": [{"message": {"content": "반응_문의"}}]}
+    )
+
+    wb = openpyxl.load_workbook(src)
+    classify_voc.run_classification(
+        wb, api_key="test-key", output_path=out, source_path=src
+    )
+
+    after_media, after_drawings = _xlsx_part_counts(out)
+
+    assert after_media == before_media
+    assert after_drawings == before_drawings
+
+
+@pytest.mark.integration
+@patch("classify_voc.urllib.request.urlopen")
+def test_saved_output_reloads_linked_card_updates(mock_urlopen):
+    import classify_voc
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src = Path(tmpdir) / "source.xlsx"
+        out = Path(tmpdir) / "result.xlsx"
+
+        wb, ws = _build_base_workbook()
+        ws.cell(5, 7).value = "반응_제품반응"
+        ws.cell(5, 10).value = "어디서 구매"
+        ws.cell(5, 11).value = "원문"
+        ws.cell(5, 11).hyperlink = "https://example.com/post/5"
+        card_sheet = wb.create_sheet("IB")
+        _add_card(card_sheet, 2, "https://example.com/post/5")
+        _add_card(card_sheet, 14, "https://example.com/post/5")
+        wb.save(src)
+
+        mock_urlopen.return_value = _mock_http_response(
+            {"choices": [{"message": {"content": "반응_문의"}}]}
+        )
+
+        loaded = openpyxl.load_workbook(src)
+        classify_voc.run_classification(
+            loaded, api_key="test-key", output_path=out, source_path=src
+        )
+
+        saved = openpyxl.load_workbook(out)
+
+    assert saved["2026 list"].cell(5, 7).value == "반응_문의"
+    assert saved["IB"].cell(5, 3).value == "반응_문의"
+    assert saved["IB"].cell(5, 15).value == "반응_문의"
+
+
+@pytest.mark.integration
+@patch("classify_voc.urllib.request.urlopen")
+def test_saved_output_without_linked_card_mapping_is_readable(mock_urlopen):
+    import classify_voc
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src = Path(tmpdir) / "source.xlsx"
+        out = Path(tmpdir) / "result.xlsx"
+
+        wb, ws = _build_base_workbook()
+        ws.cell(5, 7).value = "반응_제품반응"
+        ws.cell(5, 10).value = "가격 궁금해요"
+        wb.save(src)
+
+        mock_urlopen.return_value = _mock_http_response(
+            {"choices": [{"message": {"content": "반응_정보"}}]}
+        )
+
+        loaded = openpyxl.load_workbook(src)
+        classify_voc.run_classification(
+            loaded, api_key="test-key", output_path=out, source_path=src
+        )
+
+        saved = openpyxl.load_workbook(out)
+
+    assert saved["2026 list"].cell(5, 7).value == "반응_정보"
