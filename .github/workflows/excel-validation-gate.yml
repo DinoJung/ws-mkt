@@ -23,10 +23,8 @@ on:
 jobs:
   validate-excel-compatibility:
     name: Validate Windows Excel Compatibility
-    # MANDATORY: self-hosted runner with real Excel installed
-    # 'windows-excel' label implies a physical or VM runner with Excel available via COM
     runs-on: [self-hosted, windows, windows-excel]
-    
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -61,6 +59,7 @@ jobs:
             $roots.Add([System.IO.Path]::GetFullPath($searchRoot))
           }
           if (Test-Path "output") { $roots.Add([System.IO.Path]::GetFullPath("output")) }
+          if (Test-Path "voc/output") { $roots.Add([System.IO.Path]::GetFullPath("voc/output")) }
           $roots.Add([System.IO.Path]::GetFullPath("."))
 
           $matches = @()
@@ -79,10 +78,11 @@ jobs:
 
       - name: Run Windows Excel COM Smoke Test
         run: |
-          powershell -File ci/excel_open_smoke.ps1 -FilePath "${{ steps.resolve_artifact.outputs.artifact_path }}"
+          powershell -File voc/ci/excel_open_smoke.ps1 -FilePath "${{ steps.resolve_artifact.outputs.artifact_path }}"
         shell: powershell
 
       - name: Upload Evidence JSON
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: excel-validation-evidence
