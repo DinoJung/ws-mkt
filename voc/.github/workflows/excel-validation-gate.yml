@@ -1,0 +1,90 @@
+name: Windows Excel Validation Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_path:
+        description: 'Optional explicit .xlsx path (relative to repo root or absolute on runner)'
+        required: false
+        default: ''
+      artifact_name:
+        description: 'Optional uploaded artifact name to download first (same run context)'
+        required: false
+        default: ''
+      artifact_pattern:
+        description: 'Workbook file pattern used during artifact auto-discovery'
+        required: false
+        default: '*.xlsx'
+      search_root:
+        description: 'Fallback search root for auto-discovery when artifact_path is empty'
+        required: false
+        default: '.'
+
+jobs:
+  validate-excel-compatibility:
+    name: Validate Windows Excel Compatibility
+    # MANDATORY: self-hosted runner with real Excel installed
+    # 'windows-excel' label implies a physical or VM runner with Excel available via COM
+    runs-on: [self-hosted, windows, windows-excel]
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download Uploaded Artifact (optional)
+        if: ${{ github.event.inputs.artifact_name != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.artifact_name }}
+          path: .sisyphus/artifacts
+
+      - name: Resolve Workbook Artifact
+        id: resolve_artifact
+        run: |
+          $explicitPath = "${{ github.event.inputs.artifact_path }}"
+          $pattern = "${{ github.event.inputs.artifact_pattern }}"
+          $searchRoot = "${{ github.event.inputs.search_root }}"
+
+          if ($explicitPath -and $explicitPath.Trim().Length -gt 0) {
+            $candidate = [System.IO.Path]::GetFullPath($explicitPath)
+            if (-not (Test-Path $candidate)) {
+              throw "artifact_path does not exist: $candidate"
+            }
+            "artifact_path=$candidate" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Host "Resolved explicit artifact: $candidate"
+            exit 0
+          }
+
+          $roots = New-Object System.Collections.Generic.List[string]
+          if (Test-Path ".sisyphus/artifacts") { $roots.Add([System.IO.Path]::GetFullPath(".sisyphus/artifacts")) }
+          if ($searchRoot -and $searchRoot.Trim().Length -gt 0 -and (Test-Path $searchRoot)) {
+            $roots.Add([System.IO.Path]::GetFullPath($searchRoot))
+          }
+          if (Test-Path "output") { $roots.Add([System.IO.Path]::GetFullPath("output")) }
+          $roots.Add([System.IO.Path]::GetFullPath("."))
+
+          $matches = @()
+          foreach ($root in ($roots | Select-Object -Unique)) {
+            $matches += Get-ChildItem -Path $root -Recurse -File -Filter $pattern -ErrorAction SilentlyContinue
+          }
+
+          $picked = $matches | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+          if ($null -eq $picked) {
+            throw "No workbook artifact found. Provide artifact_path or artifact_name, or adjust search_root/artifact_pattern."
+          }
+
+          "artifact_path=$($picked.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Resolved discovered artifact: $($picked.FullName)"
+        shell: powershell
+
+      - name: Run Windows Excel COM Smoke Test
+        run: |
+          powershell -File ci/excel_open_smoke.ps1 -FilePath "${{ steps.resolve_artifact.outputs.artifact_path }}"
+        shell: powershell
+
+      - name: Upload Evidence JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: excel-validation-evidence
+          path: .sisyphus/evidence/task-8-excel-smoke.json
+          retention-days: 7

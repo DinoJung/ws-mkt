@@ -14,6 +14,16 @@ This directory contains the VOC classification workflow for reading a source Exc
 2. Run `classify_voc.py` with the workbook path.
 3. Review the generated workbook in `output/`.
 
+## Windows Compatibility & Release Gating
+
+The `.xlsx` output is generated on Linux for performance. To ensure compatibility:
+- All releases require a `Windows Excel Validation Gate` signoff.
+- This gate uses a self-hosted Windows runner with real Excel (via COM) to verify no repair warnings exist.
+- The gate can resolve artifacts via explicit path, optional downloaded artifact name, or newest `.xlsx` discovery from configured roots.
+- Validation now records concrete repair evidence signals (new repair-log artifacts and normal-open vs repair-open behavior), not just single-cell access.
+- Reference: `.sisyphus/plans/xlsx-output-compat-performance.md` Task 8.
+
+
 ## Example
 
 ```bash
