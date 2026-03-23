@@ -1,0 +1,7 @@
+{
+  "include_contract_writable_surface_sheet_xml": true,
+  "contract_path": ".sisyphus/contracts/xlsx-template-contract.json",
+  "allowed_changed_parts": [],
+  "allowed_changed_part_prefixes": [],
+  "allowed_changed_part_patterns": []
+}
