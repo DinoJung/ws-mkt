@@ -2,11 +2,16 @@
 
 # pyright: reportMissingImports=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
 import json
+import copy
+import importlib
+import xml.etree.ElementTree as ET
 from pathlib import Path
 import re
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
-from typing import Any
 from unittest.mock import patch, MagicMock
 from io import BytesIO
 from zipfile import ZipFile
@@ -63,10 +68,15 @@ def _pipeline_callable(module):
 
 
 def _real_input_workbook() -> Path:
-    path = Path("input/2026더캐리VOC(리포트파일)_260309~260315.xlsx")
-    if not path.exists():
-        pytest.skip("real input workbook not available")
-    return path
+    candidates = [
+        Path("input/2026더캐리VOC(리포트파일)_260316~260322.xlsx"),
+        Path("input/2026더캐리VOC(리포트파일)_260309~260315.xlsx"),
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    pytest.skip("real input workbook not available")
+    raise AssertionError("unreachable")
 
 
 def _xlsx_part_counts(path: Path) -> tuple[int, int]:
@@ -74,6 +84,68 @@ def _xlsx_part_counts(path: Path) -> tuple[int, int]:
         media = [name for name in zf.namelist() if name.startswith("xl/media/")]
         drawings = [name for name in zf.namelist() if name.startswith("xl/drawings/")]
     return len(media), len(drawings)
+
+
+def _xlsx_member_crc_map(path: Path) -> dict[str, int]:
+    with ZipFile(path) as zf:
+        return {item.filename: item.CRC for item in zf.infolist()}
+
+
+def _changed_zip_parts(source: Path, output: Path) -> set[str]:
+    src = _xlsx_member_crc_map(source)
+    out = _xlsx_member_crc_map(output)
+    names = set(src) | set(out)
+    return {name for name in names if src.get(name) != out.get(name)}
+
+
+def _sheet_max_col_map(path: Path) -> dict[str, int]:
+    wb = openpyxl.load_workbook(path)
+    return {ws.title: ws.max_column for ws in wb.worksheets}
+
+
+def _build_legacy_baseline_updates(src: Path):
+    import classify_voc
+
+    wb = openpyxl.load_workbook(src)
+    targets = classify_voc.read_target_rows(wb)
+    if not targets:
+        pytest.skip("fixture has no target rows")
+    first_target = targets[0]
+    return classify_voc._build_sheet_updates(
+        first_target["row"],
+        first_target.get("link"),
+        "반응_기타",
+        classify_voc.build_card_index(wb),
+    )
+
+
+def _save_value_only_patch(source_path: Path, output_path: Path, updates):
+    import classify_voc
+
+    by_sheet: dict[str, dict[str, str]] = {}
+    for update in updates:
+        by_sheet.setdefault(update["sheet_name"], {})[update["cell_ref"]] = update[
+            "value"
+        ]
+
+    with ZipFile(source_path, "r") as source_zip:
+        sheet_paths = classify_voc._sheet_xml_paths(source_zip)
+        patched_entries: dict[str, bytes] = {}
+        for sheet_name, sheet_updates in by_sheet.items():
+            sheet_path = sheet_paths.get(sheet_name)
+            if not sheet_path:
+                continue
+            patched_entries[sheet_path] = classify_voc._patch_sheet_xml(
+                source_zip.read(sheet_path), sheet_updates
+            )
+
+        with ZipFile(output_path, "w") as out_zip:
+            out_zip.comment = source_zip.comment
+            for item in source_zip.infolist():
+                data = patched_entries.get(item.filename)
+                if data is None:
+                    data = source_zip.read(item.filename)
+                out_zip.writestr(item, data)
 
 
 def _apply_card_outline(ws, start_col: int):
@@ -109,6 +181,59 @@ def _apply_card_outline(ws, start_col: int):
                     top=cell.border.top,
                     bottom=cell.border.bottom,
                 )
+
+
+def _supported_workbook_contract():
+    return importlib.import_module("xlsx_template_contract").load_template_contract()
+
+
+def _xlsx_package_diff_validator_cmd(template: Path, output: Path) -> list[str]:
+    repo_root = Path(__file__).resolve().parent
+    return [
+        sys.executable,
+        str(repo_root / "scripts/check_xlsx_package_diff.py"),
+        "--template",
+        str(template),
+        "--output",
+        str(output),
+        "--allowlist",
+        str(repo_root / ".sisyphus/contracts/xlsx-allowlist.json"),
+    ]
+
+
+def _rewrite_zip_member(path: Path, member_name: str, mutate):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        patched = Path(tmpdir) / "patched.xlsx"
+        with ZipFile(path, "r") as src_zip, ZipFile(patched, "w") as out_zip:
+            out_zip.comment = src_zip.comment
+            for item in src_zip.infolist():
+                data = src_zip.read(item.filename)
+                if item.filename == member_name:
+                    data = mutate(data)
+                out_zip.writestr(item, data)
+        patched.replace(path)
+
+
+def _mutate_first_non_writable_cell(
+    xml_bytes: bytes, writable_cells: set[str]
+) -> bytes:
+    ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    root = ET.fromstring(xml_bytes)
+    for cell in root.findall(f".//{{{ns}}}c"):
+        cell_ref = cell.attrib.get("r")
+        if not cell_ref or cell_ref in writable_cells:
+            continue
+        if cell.find(f"{{{ns}}}f") is not None:
+            continue
+        value_node = cell.find(f"{{{ns}}}v")
+        if value_node is not None:
+            value_node.text = (value_node.text or "") + "__drift__"
+            return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+        inline_text = cell.find(f"{{{ns}}}is/{{{ns}}}t")
+        if inline_text is not None:
+            inline_text.text = (inline_text.text or "") + "__drift__"
+            return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    raise AssertionError("failed to locate a non-writable cell for mutation")
 
 
 class TestVocClassifier(unittest.TestCase):
@@ -245,12 +370,6 @@ class TestVocClassifier(unittest.TestCase):
         except TypeError:
             pass
 
-    def test_build_image_index_empty(self):
-        import classify_voc
-
-        wb, _ = _build_base_workbook()
-        assert classify_voc.build_image_index(wb) == {}
-
     def test_build_card_index_includes_duplicate_links(self):
         import classify_voc
 
@@ -348,7 +467,6 @@ class TestVocClassifier(unittest.TestCase):
         result = classify_voc.classify_item(
             "[교환] 사이즈 교환해요",
             link="https://example.com/post/1",
-            image_index={"https://example.com/post/1": [b"img"]},
             api_key="test-key",
         )
 
@@ -356,34 +474,31 @@ class TestVocClassifier(unittest.TestCase):
         mock_urlopen.assert_not_called()
 
     @patch("classify_voc.urllib.request.urlopen")
-    def test_classify_item_llm_then_image_ocr(self, mock_urlopen):
+    def test_classify_item_llm_then_article_keeps_final_other(self, mock_urlopen):
         import classify_voc
-
-        image_index = {"https://example.com/post/1": [b"image-a", b"image-b"]}
 
         def side_effect(request, *args, **kwargs):
             if request.data is None:
                 response = MagicMock()
-                response.__enter__.return_value.read.return_value = b"<html></html>"
+                response.__enter__.return_value.read.return_value = (
+                    '<div class="article viewer"><p>공지 외 내용 없음</p></div>'.encode(
+                        "utf-8"
+                    )
+                )
                 return response
             body = json.loads(request.data.decode())
-            user_content = body["messages"][1]["content"]
-            if isinstance(user_content, str):
-                return _mock_http_response(
-                    {"choices": [{"message": {"content": "반응_기타"}}]}
-                )
             return _mock_http_response(
-                {"choices": [{"message": {"content": "반응_구해요"}}]}
+                {"choices": [{"message": {"content": "반응_기타"}}]}
             )
 
         mock_urlopen.side_effect = side_effect
-        result = classify_voc.classify_item(
+        category, method = classify_voc._classify_item_with_method(
             "애매한 제목",
             link="https://example.com/post/1",
-            image_index=image_index,
             api_key="test-key",
         )
-        assert result == "반응_구해요"
+        assert category == "반응_기타"
+        assert method == "article"
 
     @patch("classify_voc.urllib.request.urlopen")
     def test_classify_item_llm_then_article_body(self, mock_urlopen):
@@ -422,34 +537,10 @@ class TestVocClassifier(unittest.TestCase):
         result = classify_voc.classify_item(
             "애매한 제목",
             link="https://example.com/post/1",
-            image_index={},
             api_key="test-key",
         )
 
         assert result == "반응_정보"
-
-    @patch("classify_voc.urllib.request.urlopen")
-    def test_classify_with_image_format(self, mock_urlopen):
-        import classify_voc
-
-        captured: dict[str, Any] = {}
-
-        def side_effect(request, *args, **kwargs):
-            captured.update(json.loads(request.data.decode()))
-            return _mock_http_response(
-                {"choices": [{"message": {"content": "반응_문의"}}]}
-            )
-
-        mock_urlopen.side_effect = side_effect
-        result = classify_voc.classify_with_image([b"abc", b"def"], api_key="test-key")
-
-        assert result == "반응_문의"
-        assert captured["model"] == "openai/gpt-4.1"
-        user_message = captured["messages"][1]["content"]
-        assert user_message[-1]["type"] == "text"
-        assert user_message[0]["type"] == "image_url"
-        assert user_message[1]["type"] == "image_url"
-        assert user_message[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
 
     def test_read_target_rows_includes_link(self):
         import classify_voc
@@ -756,7 +847,8 @@ def test_saved_output_reloads_linked_card_updates(mock_urlopen):
         ws.cell(5, 11).hyperlink = "https://example.com/post/5"
         card_sheet = wb.create_sheet("IB")
         _add_card(card_sheet, 2, "https://example.com/post/5")
-        _add_card(card_sheet, 14, "https://example.com/post/5")
+        bp_sheet = wb.create_sheet("BP_긍정")
+        _add_card(bp_sheet, 20, "https://example.com/post/5")
         wb.save(src)
 
         mock_urlopen.return_value = _mock_http_response(
@@ -772,7 +864,7 @@ def test_saved_output_reloads_linked_card_updates(mock_urlopen):
 
     assert saved["2026 list"].cell(5, 7).value == "반응_문의"
     assert saved["IB"].cell(5, 3).value == "반응_문의"
-    assert saved["IB"].cell(5, 17).value == "반응_문의"
+    assert saved["BP_긍정"].cell(5, 21).value == "반응_문의"
 
 
 @pytest.mark.integration
@@ -856,8 +948,10 @@ def test_apply_layout_to_output_workbook_formats_pages():
         classify_voc._apply_layout_to_output_workbook(path)
 
         saved = openpyxl.load_workbook(path)
+        with ZipFile(path) as zf:
+            workbook_xml = zf.read("xl/workbook.xml").decode("utf-8")
 
-    assert "주현황보고" not in saved.sheetnames
+    assert "주현황보고" in saved.sheetnames
     assert saved["IB"]["B2"].value == "Voice Of Customer"
     assert saved["IB"]["I2"].value == "Voice Of Customer"
     assert saved["IB"]["H2"].value is None
@@ -871,11 +965,12 @@ def test_apply_layout_to_output_workbook_formats_pages():
     assert saved["IB"].print_options.verticalCentered is True
     assert saved["IB"].page_setup.pageOrder == "overThenDown"
     assert saved["IB"].page_margins.left == pytest.approx(original_left_margin + 0.2)
+    assert 'name="주현황보고"' in workbook_xml
 
 
 @pytest.mark.integration
 @patch("classify_voc.urllib.request.urlopen")
-def test_saved_output_applies_layout_rules(mock_urlopen):
+def test_primary_template_value_only_output_passes_package_validator(mock_urlopen):
     import classify_voc
 
     src = _real_input_workbook()
@@ -890,13 +985,401 @@ def test_saved_output_applies_layout_rules(mock_urlopen):
         wb, api_key="test-key", output_path=out, source_path=src
     )
 
-    saved = openpyxl.load_workbook(out)
+    result = subprocess.run(
+        _xlsx_package_diff_validator_cmd(src, out),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
-    assert "주현황보고" not in saved.sheetnames
-    assert saved["IB"].print_area == "'IB'!$B$2:$AQ$35"
-    assert saved["IB"].column_dimensions["H"].width == pytest.approx(0.875)
-    assert saved["IB"].column_dimensions["O"].width == pytest.approx(0.875)
-    assert saved["IB"].page_setup.pageOrder == "overThenDown"
-    assert saved["IB"].print_options.horizontalCentered is True
-    assert saved["IB"].print_options.verticalCentered is True
-    assert saved["IB"].page_margins.left == pytest.approx(0.45)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PASS:" in result.stdout
+
+
+@pytest.mark.integration
+def test_xlsx_baseline_matrix_real_workbook():
+    import classify_voc
+
+    src = _real_input_workbook()
+    updates = _build_legacy_baseline_updates(src)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        value_only = tmp / "value-only.xlsx"
+        layout_only = tmp / "layout-only.xlsx"
+        mixed = tmp / "mixed-legacy.xlsx"
+
+        _save_value_only_patch(src, value_only, updates)
+        shutil.copy2(src, layout_only)
+        classify_voc._apply_layout_to_output_workbook(layout_only)
+        classify_voc.save_workbook_with_preserved_media_legacy(src, mixed, updates)
+
+        source_cols = _sheet_max_col_map(src)
+        value_only_cols = _sheet_max_col_map(value_only)
+        layout_only_cols = _sheet_max_col_map(layout_only)
+        mixed_cols = _sheet_max_col_map(mixed)
+
+        source_parts = _xlsx_part_counts(src)
+        value_only_parts = _xlsx_part_counts(value_only)
+        layout_only_parts = _xlsx_part_counts(layout_only)
+        mixed_parts = _xlsx_part_counts(mixed)
+
+        value_only_changed = _changed_zip_parts(src, value_only)
+        layout_only_changed = _changed_zip_parts(src, layout_only)
+        mixed_changed = _changed_zip_parts(src, mixed)
+
+    assert value_only_parts == source_parts
+    assert layout_only_parts == source_parts
+    assert mixed_parts == source_parts
+
+    assert value_only_cols["2026 list"] == source_cols["2026 list"]
+    assert any(
+        layout_only_cols[name] > source_cols[name]
+        for name in source_cols
+        if name != "2026 list" and name in layout_only_cols
+    )
+    assert any(
+        mixed_cols[name] > source_cols[name]
+        for name in source_cols
+        if name != "2026 list" and name in mixed_cols
+    )
+
+    assert len(value_only_changed) < len(mixed_changed)
+    assert "xl/workbook.xml" not in value_only_changed
+    assert "xl/workbook.xml" in layout_only_changed
+    assert "xl/workbook.xml" in mixed_changed
+
+
+@pytest.mark.integration
+def test_workbook_topology_preserved_baseline_legacy_writer_not_preserved():
+    import classify_voc
+
+    src = _real_input_workbook()
+    updates = _build_legacy_baseline_updates(src)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / "legacy-output.xlsx"
+        classify_voc.save_workbook_with_preserved_media_legacy(src, out, updates)
+
+        source_cols = _sheet_max_col_map(src)
+        output_cols = _sheet_max_col_map(out)
+
+    increased = [
+        name
+        for name, src_col in source_cols.items()
+        if name != "2026 list" and output_cols.get(name, src_col) > src_col
+    ]
+    assert increased
+
+
+@pytest.mark.integration
+def test_package_diff_allowlist_baseline_legacy_writer_has_wide_changes():
+    import classify_voc
+
+    src = _real_input_workbook()
+    updates = _build_legacy_baseline_updates(src)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / "legacy-output.xlsx"
+        classify_voc.save_workbook_with_preserved_media_legacy(src, out, updates)
+        changed = _changed_zip_parts(src, out)
+
+        with ZipFile(src) as zf:
+            sheet_paths = classify_voc._sheet_xml_paths(zf)
+        all_sheet_xml = set(sheet_paths.values())
+
+    changed_sheet_xml = {name for name in changed if name in all_sheet_xml}
+    changed_drawings = {
+        name
+        for name in changed
+        if name.startswith("xl/drawings/") and name.endswith(".xml")
+    }
+
+    assert "xl/workbook.xml" in changed
+    assert changed_sheet_xml
+    assert changed_drawings
+
+
+@pytest.mark.integration
+def test_writable_surface_contract_supported_template():
+    xlsx_template_contract = importlib.import_module("xlsx_template_contract")
+
+    src = _real_input_workbook()
+    contract = _supported_workbook_contract()
+
+    fingerprint = xlsx_template_contract.validate_supported_workbook(src, contract)
+    allowed = xlsx_template_contract.expand_allowed_writable_surface(contract)
+
+    assert fingerprint["workbook_xml_sha256"] in {
+        contract["supported_workbook_family"]["workbook_xml_sha256"]
+    }
+    assert fingerprint["sheet_order"] == contract["preserved_topology"]["sheet_order"]
+    assert fingerprint["sheet_states"] == contract["preserved_topology"]["sheet_states"]
+    assert (
+        fingerprint["linked_card_targets"]
+        == contract["writable_surface"]["linked_card_targets"]
+    )
+    assert len(allowed["2026 list"]) == 216
+    assert (
+        sum(
+            len(cell_refs)
+            for sheet_name, cell_refs in allowed.items()
+            if sheet_name != "2026 list"
+        )
+        == 162
+    )
+
+
+@pytest.mark.integration
+def test_writable_surface_contract_supports_family_without_file_hash_lock():
+    xlsx_template_contract = importlib.import_module("xlsx_template_contract")
+
+    src = _real_input_workbook()
+    contract = copy.deepcopy(_supported_workbook_contract())
+    contract["supported_workbook_family"]["file_sha256"] = "0" * 64
+
+    fingerprint = xlsx_template_contract.validate_supported_workbook(src, contract)
+
+    assert fingerprint["sheet_order"] == contract["preserved_topology"]["sheet_order"]
+    assert (
+        fingerprint["linked_card_targets"]
+        == contract["writable_surface"]["linked_card_targets"]
+    )
+
+
+@pytest.mark.integration
+def test_writable_surface_contract_rejects_sheet_state_drift():
+    xlsx_template_contract = importlib.import_module("xlsx_template_contract")
+
+    src = _real_input_workbook()
+    contract = copy.deepcopy(_supported_workbook_contract())
+    contract["preserved_topology"]["sheet_states"]["주현황보고"] = "visible"
+
+    with pytest.raises(xlsx_template_contract.WorkbookContractError) as excinfo:
+        xlsx_template_contract.validate_supported_workbook(src, contract)
+
+    assert excinfo.value.code == "unsupported_sheet_state"
+
+
+@pytest.mark.integration
+def test_writable_surface_contract_allows_supported_updates():
+    xlsx_template_contract = importlib.import_module("xlsx_template_contract")
+
+    src = _real_input_workbook()
+    contract = _supported_workbook_contract()
+    updates = _build_legacy_baseline_updates(src)
+
+    xlsx_template_contract.enforce_writable_surface(updates, contract)
+
+
+def test_writable_surface_rejects_unknown_cell():
+    xlsx_template_contract = importlib.import_module("xlsx_template_contract")
+
+    contract = _supported_workbook_contract()
+    updates = [
+        {
+            "sheet_name": "2026 list",
+            "cell_ref": "H5",
+            "value": "반응_문의",
+        }
+    ]
+
+    with pytest.raises(xlsx_template_contract.WorkbookContractError) as excinfo:
+        xlsx_template_contract.enforce_writable_surface(updates, contract)
+
+    assert excinfo.value.code == "unsupported_write_cell"
+    assert "2026 list!H5" in str(excinfo.value)
+
+
+@pytest.mark.integration
+def test_primary_writer_rejects_structural_edit():
+    import classify_voc
+
+    xlsx_template_contract = importlib.import_module("xlsx_template_contract")
+
+    src = _real_input_workbook()
+    updates: list[classify_voc.CellUpdate] = [
+        {
+            "sheet_name": "2026 list",
+            "cell_ref": "H5",
+            "value": "반응_문의",
+        }
+    ]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / "structural-edit.xlsx"
+        with pytest.raises(xlsx_template_contract.WorkbookContractError) as excinfo:
+            classify_voc.save_workbook_with_preserved_media(src, out, updates)
+
+    assert excinfo.value.code == "unsupported_write_cell"
+
+
+@pytest.mark.integration
+@patch("classify_voc.urllib.request.urlopen")
+def test_run_classification_primary_path_skips_layout_mutation(mock_urlopen):
+    import classify_voc
+
+    src = _real_input_workbook()
+    out = Path(tempfile.mkdtemp()) / src.name
+
+    mock_urlopen.return_value = _mock_http_response(
+        {"choices": [{"message": {"content": "반응_문의"}}]}
+    )
+
+    wb = openpyxl.load_workbook(src)
+    with patch.object(
+        classify_voc,
+        "_apply_output_layout_to_workbook",
+        side_effect=AssertionError(
+            "layout mutation path should not run in primary writer"
+        ),
+    ):
+        classify_voc.run_classification(
+            wb, api_key="test-key", output_path=out, source_path=src
+        )
+
+
+@pytest.mark.integration
+def test_supported_variant_uses_primary_writer(capsys):
+    import classify_voc
+
+    src = _real_input_workbook()
+    updates = _build_legacy_baseline_updates(src)
+
+    selection = classify_voc.select_output_writer(src, updates)
+    assert selection["supported"] is True
+    assert selection["writer"] == "primary_template_value_only"
+    assert selection["policy"] == "hard_fail"
+    assert selection["reason_code"] is None
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / src.name
+        classify_voc.save_workbook_with_preserved_media(src, out, updates)
+        assert out.exists()
+
+    captured = capsys.readouterr()
+    assert "output_writer=primary_template_value_only policy=hard_fail" in captured.err
+
+
+@pytest.mark.integration
+def test_unsupported_variant_detection_hard_fail_reason_code(capsys):
+    import classify_voc
+
+    src = _real_input_workbook()
+    updates = _build_legacy_baseline_updates(src)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        unsupported = tmpdir_path / "unsupported-sheet-state.xlsx"
+        out = tmpdir_path / "output.xlsx"
+        shutil.copy2(src, unsupported)
+        _rewrite_zip_member(
+            unsupported,
+            "xl/workbook.xml",
+            lambda data: data.replace(b'state="hidden"', b'state="visible"', 1),
+        )
+
+        selection = classify_voc.select_output_writer(unsupported, updates)
+        assert selection["supported"] is False
+        assert selection["writer"] == "unsupported_variant"
+        assert selection["policy"] == "hard_fail"
+        assert selection["reason_code"] == "unsupported_sheet_state"
+
+        with pytest.raises(classify_voc.UnsupportedWorkbookVariantError) as excinfo:
+            classify_voc.save_workbook_with_preserved_media(unsupported, out, updates)
+
+        assert excinfo.value.reason_code == "unsupported_sheet_state"
+        assert excinfo.value.policy == "hard_fail"
+        assert not out.exists()
+
+    captured = capsys.readouterr()
+    assert (
+        "output_writer=unsupported policy=hard_fail reason_code=unsupported_sheet_state"
+        in captured.err
+    )
+
+
+@pytest.mark.integration
+def test_workbook_topology_preserved_for_allowlisted_value_only_output():
+    src = _real_input_workbook()
+    updates = _build_legacy_baseline_updates(src)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / "value-only.xlsx"
+        _save_value_only_patch(src, out, updates)
+        result = subprocess.run(
+            _xlsx_package_diff_validator_cmd(src, out),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PASS:" in result.stdout
+
+
+@pytest.mark.integration
+def test_package_diff_allowlist_rejects_unexpected_change():
+    src = _real_input_workbook()
+    updates = _build_legacy_baseline_updates(src)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / "value-only-mutated.xlsx"
+        _save_value_only_patch(src, out, updates)
+        _rewrite_zip_member(
+            out, "xl/_rels/workbook.xml.rels", lambda data: data + b"\n"
+        )
+        result = subprocess.run(
+            _xlsx_package_diff_validator_cmd(src, out),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "unexpected changed package parts" in result.stdout
+    assert "xl/_rels/workbook.xml.rels" in result.stdout
+
+
+@pytest.mark.integration
+def test_package_diff_allowlist_rejects_non_writable_cell_drift_inside_writable_sheet_xml():
+    import classify_voc
+
+    xlsx_template_contract = importlib.import_module("xlsx_template_contract")
+
+    src = _real_input_workbook()
+    updates = _build_legacy_baseline_updates(src)
+    contract = _supported_workbook_contract()
+    writable_surface = xlsx_template_contract.expand_allowed_writable_surface(contract)
+
+    with ZipFile(src) as zf:
+        sheet_path = classify_voc._sheet_xml_paths(zf)[
+            contract["writable_surface"]["primary_target"]["sheet_name"]
+        ]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / "value-only-writable-drift.xlsx"
+        _save_value_only_patch(src, out, updates)
+        _rewrite_zip_member(
+            out,
+            sheet_path,
+            lambda data: _mutate_first_non_writable_cell(
+                data,
+                set(
+                    writable_surface[
+                        contract["writable_surface"]["primary_target"]["sheet_name"]
+                    ]
+                ),
+            ),
+        )
+        result = subprocess.run(
+            _xlsx_package_diff_validator_cmd(src, out),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert (
+        "allowlisted writable sheet contains structural/layout drift" in result.stdout
+    )
