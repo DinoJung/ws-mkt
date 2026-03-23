@@ -4,6 +4,7 @@ import argparse
 import base64
 import html
 import json
+import math
 import os
 import re
 import sys
@@ -13,11 +14,18 @@ import urllib.error
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from pathlib import Path
+from posixpath import dirname, normpath, join as posix_join
 from zipfile import ZipFile
 from typing import Any, TypedDict
 
 import openpyxl
+from openpyxl.styles import Border, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import (
+    column_index_from_string,
+    quote_sheetname,
+    range_boundaries,
+)
 
 
 VALID_CATEGORIES = {
@@ -71,8 +79,24 @@ NOTICE_PHRASES = ("회원간의 거래 분쟁에 대한 공론화 금지",)
 XML_NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 XML_NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 XML_NS_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+XML_NS_MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+XML_NS_X14AC = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac"
+XML_NS_XDR = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+DELETE_SHEET_NAME = "주현황보고"
+LAYOUT_EXCLUDED_SHEET = TARGET_SHEET
+PAGE_START_COLUMN = 2
+PAGE_CONTENT_WIDTH = 6
+PAGE_TOTAL_WIDTH = 7
+PAGE_START_ROW = 2
+PAGE_END_ROW = 35
+PAD_COLUMN_WIDTH = 0.875
+THICK_BLACK_SIDE = Side(style="medium", color="000000")
 
 ET.register_namespace("", XML_NS_MAIN)
+ET.register_namespace("r", XML_NS_REL)
+ET.register_namespace("mc", XML_NS_MC)
+ET.register_namespace("x14ac", XML_NS_X14AC)
+ET.register_namespace("xdr", XML_NS_XDR)
 
 
 class TargetRow(TypedDict):
@@ -723,6 +747,403 @@ def _patch_sheet_xml(xml_bytes: bytes, updates: dict[str, str]) -> bytes:
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
+def _layout_page_count(max_col: int) -> int:
+    if max_col < PAGE_START_COLUMN:
+        return 0
+    return math.ceil((max_col - PAGE_START_COLUMN + 1) / PAGE_CONTENT_WIDTH)
+
+
+def _shift_layout_column_index(col_idx: int) -> int:
+    if col_idx < PAGE_START_COLUMN:
+        return col_idx
+    return col_idx + ((col_idx - PAGE_START_COLUMN) // PAGE_CONTENT_WIDTH)
+
+
+def _layout_print_area_end_col(max_col: int) -> int:
+    if max_col < PAGE_START_COLUMN:
+        return PAGE_START_COLUMN
+    return _shift_layout_column_index(max_col) + 1
+
+
+def _shift_layout_marker_column(zero_based_col_idx: int) -> int:
+    return _shift_layout_column_index(zero_based_col_idx + 1) - 1
+
+
+def _shift_layout_cell_ref(cell_ref: str) -> str:
+    row_idx, col_letters = _split_cell_ref(cell_ref)
+    col_idx = column_index_from_string(col_letters)
+    return f"{get_column_letter(_shift_layout_column_index(col_idx))}{row_idx}"
+
+
+def _shift_layout_ref_token(token: str) -> str:
+    if re.fullmatch(r"[A-Z]+\d+", token):
+        return _shift_layout_cell_ref(token)
+    if re.fullmatch(r"[A-Z]+\d+:[A-Z]+\d+", token):
+        min_col, min_row, max_col, max_row = range_boundaries(token)
+        if min_col is None or min_row is None or max_col is None or max_row is None:
+            return token
+        return (
+            f"{get_column_letter(_shift_layout_column_index(min_col))}{min_row}:"
+            f"{get_column_letter(_shift_layout_column_index(max_col))}{max_row}"
+        )
+    return token
+
+
+def _shift_layout_sqref(value: str) -> str:
+    return " ".join(_shift_layout_ref_token(token) for token in value.split())
+
+
+def _shift_layout_spans(value: str) -> str:
+    start, end = value.split(":", 1)
+    return f"{_shift_layout_column_index(int(start))}:{_shift_layout_column_index(int(end))}"
+
+
+def _coalesce_column_ranges(
+    columns: list[tuple[int, dict[str, str]]],
+) -> list[tuple[int, int, dict[str, str]]]:
+    coalesced: list[tuple[int, int, dict[str, str]]] = []
+    for col_idx, attrs in columns:
+        if coalesced and coalesced[-1][1] + 1 == col_idx and coalesced[-1][2] == attrs:
+            start, _, prev_attrs = coalesced[-1]
+            coalesced[-1] = (start, col_idx, prev_attrs)
+            continue
+        coalesced.append((col_idx, col_idx, attrs))
+    return coalesced
+
+
+def _replace_cols_element(root: ET.Element, max_col: int):
+    cols_tag = f"{{{XML_NS_MAIN}}}cols"
+    col_tag = f"{{{XML_NS_MAIN}}}col"
+    sheet_data_tag = f"{{{XML_NS_MAIN}}}sheetData"
+    cols = root.find(cols_tag)
+    expanded: list[tuple[int, dict[str, str]]] = []
+    if cols is not None:
+        for col in list(cols):
+            min_col = int(col.attrib["min"])
+            max_range_col = int(col.attrib["max"])
+            attrs = {k: v for k, v in col.attrib.items() if k not in {"min", "max"}}
+            for col_idx in range(min_col, max_range_col + 1):
+                expanded.append((_shift_layout_column_index(col_idx), attrs))
+
+    for page_idx in range(1, _layout_page_count(max_col) + 1):
+        content_end = PAGE_START_COLUMN + (page_idx * PAGE_CONTENT_WIDTH) - 1
+        pad_col = _shift_layout_column_index(content_end) + 1
+        expanded.append(
+            (
+                pad_col,
+                {"width": str(PAD_COLUMN_WIDTH), "customWidth": "1"},
+            )
+        )
+
+    if not expanded:
+        return
+
+    expanded.sort(key=lambda item: item[0])
+    new_cols = ET.Element(cols_tag)
+    for start, end, attrs in _coalesce_column_ranges(expanded):
+        col_attrs = {"min": str(start), "max": str(end), **attrs}
+        ET.SubElement(new_cols, col_tag, col_attrs)
+
+    if cols is not None:
+        root.remove(cols)
+    sheet_data = root.find(sheet_data_tag)
+    if sheet_data is None:
+        root.append(new_cols)
+        return
+    root.insert(list(root).index(sheet_data), new_cols)
+
+
+def _ensure_worksheet_child(root: ET.Element, local_name: str, before_names: set[str]):
+    tag = f"{{{XML_NS_MAIN}}}{local_name}"
+    existing = root.find(tag)
+    if existing is not None:
+        return existing
+
+    insert_at = len(root)
+    for idx, child in enumerate(list(root)):
+        child_name = child.tag.rsplit("}", 1)[-1]
+        if child_name in before_names:
+            insert_at = idx
+            break
+    new_child = ET.Element(tag)
+    root.insert(insert_at, new_child)
+    return new_child
+
+
+def _max_sheet_column(root: ET.Element) -> int:
+    dimension = root.find(f"{{{XML_NS_MAIN}}}dimension")
+    if dimension is not None:
+        ref = dimension.attrib.get("ref")
+        if ref:
+            _, _, max_col, _ = range_boundaries(ref)
+            if max_col is not None:
+                return max_col
+
+    max_col = 1
+    for cell in root.findall(f".//{{{XML_NS_MAIN}}}c"):
+        cell_ref = cell.attrib.get("r")
+        if not cell_ref:
+            continue
+        _, col_letters = _split_cell_ref(cell_ref)
+        max_col = max(max_col, column_index_from_string(col_letters))
+    return max_col
+
+
+def _patch_layout_sheet_xml(xml_bytes: bytes) -> tuple[bytes, int]:
+    root = ET.fromstring(xml_bytes)
+    max_col = _max_sheet_column(root)
+
+    _replace_cols_element(root, max_col)
+
+    for elem in root.iter():
+        if elem.tag == f"{{{XML_NS_MAIN}}}c":
+            cell_ref = elem.attrib.get("r")
+            if cell_ref:
+                elem.set("r", _shift_layout_cell_ref(cell_ref))
+        for attr_name in ("ref", "sqref", "activeCell", "topLeftCell"):
+            value = elem.attrib.get(attr_name)
+            if value:
+                elem.set(attr_name, _shift_layout_sqref(value))
+        spans = elem.attrib.get("spans")
+        if spans:
+            elem.set("spans", _shift_layout_spans(spans))
+
+    print_options = _ensure_worksheet_child(
+        root,
+        "printOptions",
+        {
+            "pageMargins",
+            "pageSetup",
+            "headerFooter",
+            "rowBreaks",
+            "colBreaks",
+            "drawing",
+            "legacyDrawing",
+        },
+    )
+    print_options.set("horizontalCentered", "1")
+    print_options.set("verticalCentered", "1")
+
+    page_margins = _ensure_worksheet_child(
+        root,
+        "pageMargins",
+        {
+            "pageSetup",
+            "headerFooter",
+            "rowBreaks",
+            "colBreaks",
+            "drawing",
+            "legacyDrawing",
+        },
+    )
+    left_margin = float(page_margins.attrib.get("left", "0.7"))
+    page_margins.set("left", f"{left_margin + 0.2:g}")
+
+    page_setup = _ensure_worksheet_child(
+        root,
+        "pageSetup",
+        {"headerFooter", "rowBreaks", "colBreaks", "drawing", "legacyDrawing"},
+    )
+    page_setup.set("pageOrder", "overThenDown")
+
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True), max_col
+
+
+def _normalize_zip_target(base_part: str, target: str) -> str:
+    if target.startswith("/"):
+        return target.lstrip("/")
+    return normpath(posix_join(dirname(base_part), target))
+
+
+def _sheet_rels_path(sheet_path: str) -> str:
+    file_name = sheet_path.rsplit("/", 1)[-1]
+    return f"xl/worksheets/_rels/{file_name}.rels"
+
+
+def _shift_drawing_xml(xml_bytes: bytes) -> bytes:
+    root = ET.fromstring(xml_bytes)
+    for marker_name in ("from", "to"):
+        for marker in root.findall(f".//{{{XML_NS_XDR}}}{marker_name}"):
+            col = marker.find(f"{{{XML_NS_XDR}}}col")
+            if col is None or col.text is None:
+                continue
+            col.text = str(_shift_layout_marker_column(int(col.text)))
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _update_workbook_xml(
+    xml_bytes: bytes,
+    print_areas: dict[str, str],
+    deleted_sheet_name: str | None,
+) -> bytes:
+    root = ET.fromstring(xml_bytes)
+    sheets = root.find(f"{{{XML_NS_MAIN}}}sheets")
+    if sheets is None:
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    removed_index: int | None = None
+    sheet_elements = list(sheets)
+    for idx, sheet in enumerate(sheet_elements):
+        if sheet.attrib.get("name") != deleted_sheet_name:
+            continue
+        sheets.remove(sheet)
+        removed_index = idx
+        break
+
+    remaining_sheets = list(sheets)
+    new_index_by_name = {
+        sheet.attrib["name"]: idx
+        for idx, sheet in enumerate(remaining_sheets)
+        if "name" in sheet.attrib
+    }
+
+    workbook_view = root.find(f".//{{{XML_NS_MAIN}}}workbookView")
+    if workbook_view is not None and removed_index is not None:
+        active_tab = workbook_view.attrib.get("activeTab")
+        if active_tab and active_tab.isdigit():
+            active_idx = int(active_tab)
+            if active_idx == removed_index:
+                workbook_view.set("activeTab", "0")
+            elif active_idx > removed_index:
+                workbook_view.set("activeTab", str(active_idx - 1))
+
+    defined_names = root.find(f"{{{XML_NS_MAIN}}}definedNames")
+    if defined_names is None and print_areas:
+        defined_names = ET.Element(f"{{{XML_NS_MAIN}}}definedNames")
+        calc_pr = root.find(f"{{{XML_NS_MAIN}}}calcPr")
+        if calc_pr is None:
+            root.append(defined_names)
+        else:
+            root.insert(list(root).index(calc_pr), defined_names)
+
+    if defined_names is not None:
+        for defined_name in list(defined_names):
+            local_sheet_id = defined_name.attrib.get("localSheetId")
+            if local_sheet_id is None or not local_sheet_id.isdigit():
+                continue
+            sheet_idx = int(local_sheet_id)
+            if removed_index is not None:
+                if sheet_idx == removed_index:
+                    defined_names.remove(defined_name)
+                    continue
+                if sheet_idx > removed_index:
+                    defined_name.set("localSheetId", str(sheet_idx - 1))
+                    sheet_idx -= 1
+
+            if (
+                defined_name.attrib.get("name") == "_xlnm.Print_Area"
+                and sheet_idx in new_index_by_name.values()
+            ):
+                defined_names.remove(defined_name)
+
+        for sheet_name, print_area in print_areas.items():
+            local_sheet_id = new_index_by_name.get(sheet_name)
+            if local_sheet_id is None:
+                continue
+            defined_name = ET.SubElement(
+                defined_names,
+                f"{{{XML_NS_MAIN}}}definedName",
+                {"name": "_xlnm.Print_Area", "localSheetId": str(local_sheet_id)},
+            )
+            defined_name.text = print_area
+
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _apply_layout_to_output_workbook(output_path: Path):
+    temp_path = output_path.with_suffix(f"{output_path.suffix}.tmp")
+    with ZipFile(output_path, "r") as source_zip:
+        workbook_xml = source_zip.read("xl/workbook.xml")
+        sheet_paths = _sheet_xml_paths(source_zip)
+        patched_entries: dict[str, bytes] = {}
+        print_areas: dict[str, str] = {}
+
+        for sheet_name, sheet_path in sheet_paths.items():
+            if sheet_name in {DELETE_SHEET_NAME, LAYOUT_EXCLUDED_SHEET}:
+                continue
+            patched_sheet, max_col = _patch_layout_sheet_xml(
+                source_zip.read(sheet_path)
+            )
+            patched_entries[sheet_path] = patched_sheet
+            print_areas[sheet_name] = (
+                f"{quote_sheetname(sheet_name)}!$B$2:$"
+                f"{get_column_letter(_layout_print_area_end_col(max_col))}$35"
+            )
+
+            rels_path = _sheet_rels_path(sheet_path)
+            if rels_path not in source_zip.namelist():
+                continue
+            rels_root = ET.fromstring(source_zip.read(rels_path))
+            for rel in rels_root:
+                rel_type = rel.attrib.get("Type", "")
+                target = rel.attrib.get("Target")
+                if not target or not rel_type.endswith("/drawing"):
+                    continue
+                drawing_path = _normalize_zip_target(sheet_path, target)
+                patched_entries[drawing_path] = _shift_drawing_xml(
+                    source_zip.read(drawing_path)
+                )
+
+        patched_entries["xl/workbook.xml"] = _update_workbook_xml(
+            workbook_xml,
+            print_areas,
+            DELETE_SHEET_NAME,
+        )
+
+        with ZipFile(temp_path, "w") as out_zip:
+            out_zip.comment = source_zip.comment
+            for item in source_zip.infolist():
+                data = patched_entries.get(item.filename)
+                if data is None:
+                    data = source_zip.read(item.filename)
+                out_zip.writestr(item, data)
+
+    temp_path.replace(output_path)
+
+
+def _apply_output_layout_to_workbook(wb):
+    if DELETE_SHEET_NAME in wb.sheetnames:
+        wb.remove(wb[DELETE_SHEET_NAME])
+
+    for ws in wb.worksheets:
+        if ws.title == LAYOUT_EXCLUDED_SHEET:
+            continue
+
+        page_count = _layout_page_count(ws.max_column)
+        for page_idx in range(page_count, 0, -1):
+            insert_at = PAGE_START_COLUMN + (page_idx * PAGE_CONTENT_WIDTH)
+            ws.insert_cols(insert_at)
+            ws.column_dimensions[get_column_letter(insert_at)].width = PAD_COLUMN_WIDTH
+
+        for page_idx in range(page_count):
+            start_col = PAGE_START_COLUMN + (page_idx * PAGE_TOTAL_WIDTH)
+            end_col = start_col + PAGE_CONTENT_WIDTH - 1
+            for row_idx in range(PAGE_START_ROW, PAGE_END_ROW + 1):
+                for col_idx in range(start_col, end_col + 1):
+                    cell = ws.cell(row_idx, col_idx)
+                    cell.border = Border(
+                        left=THICK_BLACK_SIDE
+                        if col_idx == start_col
+                        else cell.border.left,
+                        right=THICK_BLACK_SIDE
+                        if col_idx == end_col
+                        else cell.border.right,
+                        top=THICK_BLACK_SIDE
+                        if row_idx == PAGE_START_ROW
+                        else cell.border.top,
+                        bottom=THICK_BLACK_SIDE
+                        if row_idx == PAGE_END_ROW
+                        else cell.border.bottom,
+                    )
+
+        if page_count:
+            ws.print_area = f"$B$2:${get_column_letter(PAGE_START_COLUMN + (page_count * PAGE_TOTAL_WIDTH) - 1)}$35"
+        ws.print_options.horizontalCentered = True
+        ws.print_options.verticalCentered = True
+        ws.page_setup.pageOrder = "overThenDown"
+        ws.page_margins.left = (ws.page_margins.left or 0.7) + 0.2
+
+
 def save_workbook_with_preserved_media(
     source_path: Path, output_path: Path, updates: list[CellUpdate]
 ):
@@ -751,6 +1172,8 @@ def save_workbook_with_preserved_media(
                 if data is None:
                     data = source_zip.read(item.filename)
                 out_zip.writestr(item, data)
+
+    _apply_layout_to_output_workbook(output_path)
 
 
 def collect_classification_updates(
@@ -809,6 +1232,7 @@ def run_classification(wb, api_key, output_path, source_path: Path | None = None
     _apply_updates_to_workbook(wb, updates)
 
     if output_path:
+        _apply_output_layout_to_workbook(wb)
         if source_path is None:
             raise ValueError("source_path is required when output_path is provided")
         save_workbook_with_preserved_media(source_path, Path(output_path), updates)

@@ -3,6 +3,7 @@
 # pyright: reportMissingImports=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from typing import Any
@@ -12,6 +13,7 @@ from zipfile import ZipFile
 
 import openpyxl
 import pytest
+from openpyxl.styles import Border, Side
 
 
 VALID_CATEGORIES = {
@@ -72,6 +74,41 @@ def _xlsx_part_counts(path: Path) -> tuple[int, int]:
         media = [name for name in zf.namelist() if name.startswith("xl/media/")]
         drawings = [name for name in zf.namelist() if name.startswith("xl/drawings/")]
     return len(media), len(drawings)
+
+
+def _apply_card_outline(ws, start_col: int):
+    medium = Side(style="medium", color="000000")
+    for row_idx in range(2, 36):
+        for col_idx in range(start_col, start_col + 6):
+            cell = ws.cell(row_idx, col_idx)
+            if row_idx == 2:
+                cell.border = Border(
+                    top=medium,
+                    left=cell.border.left,
+                    right=cell.border.right,
+                    bottom=cell.border.bottom,
+                )
+            if row_idx == 35:
+                cell.border = Border(
+                    bottom=medium,
+                    left=cell.border.left,
+                    right=cell.border.right,
+                    top=cell.border.top,
+                )
+            if col_idx == start_col:
+                cell.border = Border(
+                    left=medium,
+                    right=cell.border.right,
+                    top=cell.border.top,
+                    bottom=cell.border.bottom,
+                )
+            if col_idx == start_col + 5:
+                cell.border = Border(
+                    right=medium,
+                    left=cell.border.left,
+                    top=cell.border.top,
+                    bottom=cell.border.bottom,
+                )
 
 
 class TestVocClassifier(unittest.TestCase):
@@ -273,6 +310,36 @@ class TestVocClassifier(unittest.TestCase):
 
         assert b'c r="G5"' in patched
         assert b't="inlineStr"' in patched
+
+    def test_patch_sheet_xml_preserves_ignorable_namespace_prefixes(self):
+        import classify_voc
+
+        xml = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+          xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+          mc:Ignorable="x14ac"
+          xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac">
+          <sheetFormatPr defaultRowHeight="16.5" x14ac:dyDescent="0.3"/>
+          <sheetData>
+            <row r="5" x14ac:dyDescent="0.3"><c r="G5" s="35" t="s"><v>25</v></c></row>
+          </sheetData>
+        </worksheet>
+        """
+
+        patched = classify_voc._patch_sheet_xml(xml, {"G5": "반응_문의"})
+        patched_text = patched.decode("utf-8")
+
+        assert (
+            'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"'
+            in patched_text
+        )
+        assert (
+            'xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac"'
+            in patched_text
+        )
+        assert 'mc:Ignorable="x14ac"' in patched_text
+        assert 'x14ac:dyDescent="0.3"' in patched_text
 
     @patch("classify_voc.urllib.request.urlopen")
     def test_classify_item_rule_bypasses_api(self, mock_urlopen):
@@ -705,7 +772,7 @@ def test_saved_output_reloads_linked_card_updates(mock_urlopen):
 
     assert saved["2026 list"].cell(5, 7).value == "반응_문의"
     assert saved["IB"].cell(5, 3).value == "반응_문의"
-    assert saved["IB"].cell(5, 15).value == "반응_문의"
+    assert saved["IB"].cell(5, 17).value == "반응_문의"
 
 
 @pytest.mark.integration
@@ -734,3 +801,102 @@ def test_saved_output_without_linked_card_mapping_is_readable(mock_urlopen):
         saved = openpyxl.load_workbook(out)
 
     assert saved["2026 list"].cell(5, 7).value == "반응_정보"
+
+
+@pytest.mark.integration
+@patch("classify_voc.urllib.request.urlopen")
+def test_saved_output_preserves_worksheet_namespace_prefixes(mock_urlopen):
+    import classify_voc
+
+    src = _real_input_workbook()
+    out = Path(tempfile.mkdtemp()) / src.name
+
+    mock_urlopen.return_value = _mock_http_response(
+        {"choices": [{"message": {"content": "반응_문의"}}]}
+    )
+
+    wb = openpyxl.load_workbook(src)
+    classify_voc.run_classification(
+        wb, api_key="test-key", output_path=out, source_path=src
+    )
+
+    with ZipFile(out) as zf:
+        sheet_xml = zf.read("xl/worksheets/sheet2.xml").decode("utf-8")
+
+    xmlns = dict(re.findall(r'xmlns(?::([^=]+))?="([^"]+)"', sheet_xml[:600]))
+    ignorable_match = re.search(r'([A-Za-z0-9_]+):Ignorable="([^"]+)"', sheet_xml[:600])
+
+    assert xmlns["mc"] == "http://schemas.openxmlformats.org/markup-compatibility/2006"
+    assert (
+        xmlns["x14ac"] == "http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac"
+    )
+    assert ignorable_match is not None
+    assert ignorable_match.group(1) == "mc"
+    assert ignorable_match.group(2) == "x14ac"
+
+
+def test_apply_layout_to_output_workbook_formats_pages():
+    import classify_voc
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "layout.xlsx"
+        wb, _ = _build_base_workbook()
+        wb.create_sheet("주현황보고", 0)
+        ws = wb.create_sheet("IB")
+        ws.cell(2, 2).value = "Voice Of Customer"
+        ws.cell(2, 8).value = "Voice Of Customer"
+        ws.cell(5, 3).value = "반응_제품반응"
+        ws.cell(5, 9).value = "반응_제품반응"
+        _apply_card_outline(ws, 2)
+        _apply_card_outline(ws, 8)
+        original_left_margin = ws.page_margins.left
+        ws.print_area = "'IB'!$B$2:$M$35"
+        wb.save(path)
+
+        classify_voc._apply_layout_to_output_workbook(path)
+
+        saved = openpyxl.load_workbook(path)
+
+    assert "주현황보고" not in saved.sheetnames
+    assert saved["IB"]["B2"].value == "Voice Of Customer"
+    assert saved["IB"]["I2"].value == "Voice Of Customer"
+    assert saved["IB"]["H2"].value is None
+    assert saved["IB"]["O2"].value is None
+    assert saved["IB"].print_area == "'IB'!$B$2:$O$35"
+    assert saved["IB"].column_dimensions["H"].width == pytest.approx(0.875)
+    assert saved["IB"].column_dimensions["O"].width == pytest.approx(0.875)
+    assert saved["IB"]["G2"].border.right.style == "medium"
+    assert saved["IB"]["N2"].border.right.style == "medium"
+    assert saved["IB"].print_options.horizontalCentered is True
+    assert saved["IB"].print_options.verticalCentered is True
+    assert saved["IB"].page_setup.pageOrder == "overThenDown"
+    assert saved["IB"].page_margins.left == pytest.approx(original_left_margin + 0.2)
+
+
+@pytest.mark.integration
+@patch("classify_voc.urllib.request.urlopen")
+def test_saved_output_applies_layout_rules(mock_urlopen):
+    import classify_voc
+
+    src = _real_input_workbook()
+    out = Path(tempfile.mkdtemp()) / src.name
+
+    mock_urlopen.return_value = _mock_http_response(
+        {"choices": [{"message": {"content": "반응_문의"}}]}
+    )
+
+    wb = openpyxl.load_workbook(src)
+    classify_voc.run_classification(
+        wb, api_key="test-key", output_path=out, source_path=src
+    )
+
+    saved = openpyxl.load_workbook(out)
+
+    assert "주현황보고" not in saved.sheetnames
+    assert saved["IB"].print_area == "'IB'!$B$2:$AQ$35"
+    assert saved["IB"].column_dimensions["H"].width == pytest.approx(0.875)
+    assert saved["IB"].column_dimensions["O"].width == pytest.approx(0.875)
+    assert saved["IB"].page_setup.pageOrder == "overThenDown"
+    assert saved["IB"].print_options.horizontalCentered is True
+    assert saved["IB"].print_options.verticalCentered is True
+    assert saved["IB"].page_margins.left == pytest.approx(0.45)
