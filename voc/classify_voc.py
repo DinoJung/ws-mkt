@@ -1,8 +1,8 @@
 """VOC classification script using GitHub Models API."""
 
 import argparse
-import base64
 import html
+import importlib
 import json
 import math
 import os
@@ -12,11 +12,10 @@ import time
 import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
-from io import BytesIO
 from pathlib import Path
 from posixpath import dirname, normpath, join as posix_join
 from zipfile import ZipFile
-from typing import Any, TypedDict
+from typing import Any, Mapping, Sequence, TypedDict, cast
 
 import openpyxl
 from openpyxl.styles import Border, Side
@@ -26,7 +25,6 @@ from openpyxl.utils.cell import (
     quote_sheetname,
     range_boundaries,
 )
-
 
 VALID_CATEGORIES = {
     "반응_문의",
@@ -74,7 +72,6 @@ INFO_KEYWORDS = [
     "신상",
 ]
 
-REACTION_SHEETS = ["BP_반응", "PK_반응"]
 NOTICE_PHRASES = ("회원간의 거래 분쟁에 대한 공론화 금지",)
 XML_NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 XML_NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -91,6 +88,8 @@ PAGE_START_ROW = 2
 PAGE_END_ROW = 35
 PAD_COLUMN_WIDTH = 0.875
 THICK_BLACK_SIDE = Side(style="medium", color="000000")
+PRIMARY_WRITER_ID = "primary_template_value_only"
+UNSUPPORTED_VARIANT_POLICY = "hard_fail"
 
 ET.register_namespace("", XML_NS_MAIN)
 ET.register_namespace("r", XML_NS_REL)
@@ -109,6 +108,26 @@ class CellUpdate(TypedDict):
     sheet_name: str
     cell_ref: str
     value: str
+
+
+class OutputWriterSelection(TypedDict):
+    writer: str
+    policy: str
+    supported: bool
+    reason_code: str | None
+    detail: str | None
+
+
+class UnsupportedWorkbookVariantError(RuntimeError):
+    reason_code: str
+    detail: str
+    policy: str
+
+    def __init__(self, reason_code: str, detail: str):
+        self.reason_code = reason_code
+        self.detail = detail
+        self.policy = UNSUPPORTED_VARIANT_POLICY
+        super().__init__(f"{self.policy}:{reason_code}: {detail}")
 
 
 def preprocess_title(text) -> str | None:
@@ -275,156 +294,6 @@ def _extract_link_text(cell) -> str:
     return str(cell.value or "")
 
 
-def _image_anchor_col_row(img) -> tuple[int | None, int | None]:
-    anchor = getattr(img, "anchor", None)
-    marker = getattr(anchor, "_from", None)
-    if marker is None:
-        return None, None
-    col = getattr(marker, "col", None)
-    row = getattr(marker, "row", None)
-    if col is None or row is None:
-        return None, None
-    return int(col) + 1, int(row) + 1
-
-
-def _extract_image_bytes(img) -> bytes | None:
-    if hasattr(img, "_data"):
-        try:
-            data = img._data()
-            if isinstance(data, bytes):
-                return data
-        except Exception:
-            pass
-    ref = getattr(img, "ref", None)
-    if isinstance(ref, bytes):
-        return ref
-    ref_reader = getattr(ref, "read", None)
-    if callable(ref_reader):
-        try:
-            data = ref_reader()
-            if isinstance(data, bytes):
-                return data
-            return None
-        except Exception:
-            return None
-    return None
-
-
-def build_image_index(wb) -> dict[str, list[bytes]]:
-    index: dict[str, list[bytes]] = {}
-    for sheet_name in REACTION_SHEETS:
-        if sheet_name not in wb.sheetnames:
-            continue
-        ws = wb[sheet_name]
-
-        card_starts: list[int] = []
-        for col in range(1, ws.max_column + 1):
-            value = ws.cell(2, col).value
-            if value is not None and "Voice Of Customer" in str(value):
-                card_starts.append(col)
-        if not card_starts:
-            continue
-
-        images = list(getattr(ws, "_images", []))
-        for idx, card_start in enumerate(card_starts):
-            link_col = card_start + 4
-            link = _extract_link_text(ws.cell(4, link_col))
-            if not link:
-                continue
-
-            next_card_start = (
-                card_starts[idx + 1] if idx + 1 < len(card_starts) else None
-            )
-            body_images: list[tuple[int, int, bytes]] = []
-            for img in images:
-                col, row = _image_anchor_col_row(img)
-                if col is None or row is None:
-                    continue
-                if col < card_start:
-                    continue
-                if next_card_start is not None and col >= next_card_start:
-                    continue
-                if row <= 6:
-                    continue
-                data = _extract_image_bytes(img)
-                if data:
-                    body_images.append((row, col, data))
-
-            if body_images:
-                body_images.sort(key=lambda item: (item[0], item[1]))
-                index[link] = [item[2] for item in body_images]
-    return index
-
-
-def _build_vision_request_body(
-    model: str, image_bytes_list: list[bytes]
-) -> dict[str, Any]:
-    images = [
-        {
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/jpeg;base64,{base64.b64encode(img).decode()}"
-            },
-        }
-        for img in image_bytes_list
-    ]
-    return {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "이미지에서 텍스트를 읽고 VOC를 분류하세요. "
-                    "카테고리: 반응_문의, 반응_교환, 반응_구해요, 반응_정보, 반응_기타. "
-                    "카테고리만 출력."
-                ),
-            },
-            {
-                "role": "user",
-                "content": [
-                    *images,
-                    {
-                        "type": "text",
-                        "text": "이 게시글 본문 이미지를 읽고 VOC 카테고리를 분류하세요.",
-                    },
-                ],
-            },
-        ],
-    }
-
-
-def _classify_with_image_model(
-    image_bytes_list: list[bytes], api_key: str, model: str
-) -> str | None:
-    adapter = GithubModelsAdapter(api_key=api_key, model=model)
-    backoff = 1
-    for attempt in range(3):
-        try:
-            body = _build_vision_request_body(model, image_bytes_list)
-            response = _request_json(adapter.endpoint, body, adapter.api_key)
-            content = response["choices"][0]["message"]["content"]
-            return validate_result(content)
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
-            if attempt == 2:
-                return None
-            time.sleep(backoff)
-            backoff *= 2
-        except (KeyError, IndexError, TypeError, ValueError):
-            return "반응_기타"
-        finally:
-            time.sleep(0.5)
-    return None
-
-
-def classify_with_image(image_bytes_list: list[bytes], api_key: str) -> str | None:
-    if not image_bytes_list:
-        return None
-    primary = _classify_with_image_model(image_bytes_list, api_key, "openai/gpt-4.1")
-    if primary is not None:
-        return primary
-    return _classify_with_image_model(image_bytes_list, api_key, "openai/gpt-4o")
-
-
 def _fetch_text(url: str) -> str | None:
     if not url:
         return None
@@ -559,7 +428,6 @@ def write_linked_classification_results(
 def _classify_item_with_method(
     title,
     link: str | None,
-    image_index: dict[str, list[bytes]] | None,
     api_key,
 ) -> tuple[str, str]:
     cleaned = preprocess_title(title)
@@ -581,11 +449,6 @@ def _classify_item_with_method(
         if article_result is not None and article_result != "반응_기타":
             return article_result, "article"
 
-    if primary_result == "반응_기타" and link and image_index and image_index.get(link):
-        image_result = classify_with_image(image_index[link], api_key)
-        if image_result is not None:
-            return image_result, "image"
-
     if primary_result == "반응_기타":
         return "반응_기타", "article"
 
@@ -600,15 +463,14 @@ def _classify_item_with_method(
 def classify_item(
     title,
     link: str | None,
-    image_index: dict[str, list[bytes]] | None,
     api_key,
 ) -> str:
-    category, _ = _classify_item_with_method(title, link, image_index, api_key)
+    category, _ = _classify_item_with_method(title, link, api_key)
     return category
 
 
 def classify_title(title, api_key) -> str:
-    return classify_item(title, link=None, image_index=None, api_key=api_key)
+    return classify_item(title, link=None, api_key=api_key)
 
 
 def read_target_rows(wb) -> list[TargetRow]:
@@ -1087,7 +949,7 @@ def _apply_layout_to_output_workbook(output_path: Path):
         patched_entries["xl/workbook.xml"] = _update_workbook_xml(
             workbook_xml,
             print_areas,
-            DELETE_SHEET_NAME,
+            None,
         )
 
         with ZipFile(temp_path, "w") as out_zip:
@@ -1102,11 +964,8 @@ def _apply_layout_to_output_workbook(output_path: Path):
 
 
 def _apply_output_layout_to_workbook(wb):
-    if DELETE_SHEET_NAME in wb.sheetnames:
-        wb.remove(wb[DELETE_SHEET_NAME])
-
     for ws in wb.worksheets:
-        if ws.title == LAYOUT_EXCLUDED_SHEET:
+        if ws.title in {DELETE_SHEET_NAME, LAYOUT_EXCLUDED_SHEET}:
             continue
 
         page_count = _layout_page_count(ws.max_column)
@@ -1147,7 +1006,60 @@ def _apply_output_layout_to_workbook(wb):
 def save_workbook_with_preserved_media(
     source_path: Path, output_path: Path, updates: list[CellUpdate]
 ):
+    selection = select_output_writer(source_path, updates)
+    if not selection["supported"]:
+        reason_code = selection["reason_code"] or "unsupported_unknown"
+        detail = selection["detail"] or "workbook variant is outside supported contract"
+        print(
+            f"output_writer=unsupported policy={selection['policy']} reason_code={reason_code}",
+            file=sys.stderr,
+        )
+        raise UnsupportedWorkbookVariantError(reason_code, detail)
+
+    print(
+        f"output_writer={selection['writer']} policy={selection['policy']}",
+        file=sys.stderr,
+    )
+
+    _write_workbook_value_only_copy(source_path, output_path, updates)
+
+
+def select_output_writer(
+    source_path: Path, updates: Sequence[CellUpdate]
+) -> OutputWriterSelection:
+    contract_module = importlib.import_module("xlsx_template_contract")
+    contract = contract_module.load_template_contract()
+    contract_error_cls = contract_module.WorkbookContractError
+
+    try:
+        contract_module.validate_supported_workbook(source_path, contract)
+        contract_module.enforce_writable_surface(
+            cast(Sequence[Mapping[str, str]], updates), contract
+        )
+    except contract_error_cls as exc:
+        return {
+            "writer": "unsupported_variant",
+            "policy": UNSUPPORTED_VARIANT_POLICY,
+            "supported": False,
+            "reason_code": str(exc.code),
+            "detail": str(exc.detail),
+        }
+
+    return {
+        "writer": PRIMARY_WRITER_ID,
+        "policy": UNSUPPORTED_VARIANT_POLICY,
+        "supported": True,
+        "reason_code": None,
+        "detail": None,
+    }
+
+
+def _write_workbook_value_only_copy(
+    source_path: Path, output_path: Path, updates: Sequence[CellUpdate]
+):
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_suffix(f"{output_path.suffix}.tmp")
     by_sheet: dict[str, dict[str, str]] = {}
     for update in updates:
         by_sheet.setdefault(update["sheet_name"], {})[update["cell_ref"]] = update[
@@ -1165,7 +1077,7 @@ def save_workbook_with_preserved_media(
                 source_zip.read(sheet_path), sheet_updates
             )
 
-        with ZipFile(output_path, "w") as out_zip:
+        with ZipFile(temp_path, "w") as out_zip:
             out_zip.comment = source_zip.comment
             for item in source_zip.infolist():
                 data = patched_entries.get(item.filename)
@@ -1173,14 +1085,19 @@ def save_workbook_with_preserved_media(
                     data = source_zip.read(item.filename)
                 out_zip.writestr(item, data)
 
+    temp_path.replace(output_path)
+
+
+def save_workbook_with_preserved_media_legacy(
+    source_path: Path, output_path: Path, updates: list[CellUpdate]
+):
+    save_workbook_with_preserved_media(source_path, output_path, updates)
     _apply_layout_to_output_workbook(output_path)
 
 
 def collect_classification_updates(
     wb, api_key
 ) -> tuple[list[CellUpdate], dict[str, int]]:
-    _prebuffer_workbook_images(wb)
-    image_index = build_image_index(wb)
     card_index = build_card_index(wb)
     targets = read_target_rows(wb)
     summary = {category: 0 for category in sorted(VALID_CATEGORIES)}
@@ -1191,7 +1108,6 @@ def collect_classification_updates(
         category, method = _classify_item_with_method(
             item["title"],
             item.get("link"),
-            image_index,
             api_key,
         )
         updates.extend(
@@ -1205,34 +1121,11 @@ def collect_classification_updates(
     return updates, summary
 
 
-def _prebuffer_workbook_images(wb):
-    for ws in wb.worksheets:
-        for img in getattr(ws, "_images", []):
-            try:
-                ref = img.ref
-                if hasattr(ref, "read"):
-                    ref.seek(0)
-                    data = ref.read()
-                    img.ref = BytesIO(data)
-                    img._cached_data = data
-            except Exception:
-                pass
-
-
-def _refresh_image_refs(wb):
-    for ws in wb.worksheets:
-        for img in getattr(ws, "_images", []):
-            cached = getattr(img, "_cached_data", None)
-            if cached:
-                img.ref = BytesIO(cached)
-
-
 def run_classification(wb, api_key, output_path, source_path: Path | None = None):
     updates, summary = collect_classification_updates(wb, api_key)
     _apply_updates_to_workbook(wb, updates)
 
     if output_path:
-        _apply_output_layout_to_workbook(wb)
         if source_path is None:
             raise ValueError("source_path is required when output_path is provided")
         save_workbook_with_preserved_media(source_path, Path(output_path), updates)
