@@ -1,6 +1,6 @@
 """RED-phase tests for VOC classification script."""
 
-# pyright: reportMissingImports=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
+# pyright: reportMissingImports=false, reportMissingModuleSource=false, reportImplicitRelativeImport=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
 import json
 import copy
 import importlib
@@ -26,7 +26,14 @@ VALID_CATEGORIES = {
     "반응_교환",
     "반응_구해요",
     "반응_정보",
-    "반응_기타",
+    "반응_거래",
+    "반응_마감문의",
+    "반응_단순반응",
+    "반응_제품칭찬",
+    "반응_제품비판",
+    "반응_일반감상",
+    "반응_구매추천",
+    "반응_구매비추천",
 }
 
 
@@ -114,7 +121,7 @@ def _build_legacy_baseline_updates(src: Path):
     return classify_voc._build_sheet_updates(
         first_target["row"],
         first_target.get("link"),
-        "반응_기타",
+        "반응_일반감상",
         classify_voc.build_card_index(wb),
     )
 
@@ -236,6 +243,15 @@ def _mutate_first_non_writable_cell(
     raise AssertionError("failed to locate a non-writable cell for mutation")
 
 
+def _updates_by_sheet(updates):
+    grouped: dict[str, dict[str, str]] = {}
+    for update in updates:
+        grouped.setdefault(update["sheet_name"], {})[update["cell_ref"]] = update[
+            "value"
+        ]
+    return grouped
+
+
 class TestVocClassifier(unittest.TestCase):
     def test_rule_classify_exchange(self):
         import classify_voc
@@ -256,10 +272,7 @@ class TestVocClassifier(unittest.TestCase):
         import classify_voc
 
         assert (
-            classify_voc.rule_classify(
-                "무신사) 푸마 키즈 스피드캣 발렛 키즈 79000원 무배"
-            )
-            == "반응_정보"
+            classify_voc.rule_classify("푸마 에이치스트릿 품절풀렸어요") == "반응_정보"
         )
         assert classify_voc.rule_classify("캐리마켓 최대 80% 할인 핫딜") == "반응_정보"
 
@@ -267,7 +280,15 @@ class TestVocClassifier(unittest.TestCase):
         import classify_voc
 
         assert classify_voc.rule_classify("캐리마켓 14,310원 핫딜") == "반응_정보"
-        assert classify_voc.rule_classify("원픽이긴 한데 구매처 아시는분") is None
+        assert (
+            classify_voc.rule_classify(
+                "무신사) 푸마 키즈 스피드캣 발렛 키즈 79000원 무배"
+            )
+            == "반응_문의"
+        )
+        assert (
+            classify_voc.rule_classify("원픽이긴 한데 구매처 아시는분") == "반응_문의"
+        )
 
     def test_rule_priority_keeps_seeking_before_info(self):
         import classify_voc
@@ -276,10 +297,75 @@ class TestVocClassifier(unittest.TestCase):
             classify_voc.rule_classify("[구해요] 150 구해요 79,000원") == "반응_구해요"
         )
 
+    def test_rule_classify_trade_completion(self):
+        import classify_voc
+
+        assert (
+            classify_voc.rule_classify("(완료)베베드피노 몬치치 오버롤 90사이즈")
+            == "반응_거래"
+        )
+
+    def test_rule_classify_finish_question(self):
+        import classify_voc
+
+        assert (
+            classify_voc.rule_classify("베베드피노 원래 마감이 좀 깔끔치 못한가요?")
+            == "반응_마감문의"
+        )
+
+    def test_rule_classify_simple_reaction(self):
+        import classify_voc
+
+        assert (
+            classify_voc.rule_classify("가방 왜 가벼워야 하는지 이제 알겠네요..ㅠ")
+            == "반응_단순반응"
+        )
+
+    def test_rule_classify_purchase_success_as_info(self):
+        import classify_voc
+
+        assert (
+            classify_voc.rule_classify("푸마키즈 에이치스트릿 구매 성공👍")
+            == "반응_정보"
+        )
+
     def test_rule_classify_does_not_turn_purchase_question_into_info(self):
         import classify_voc
 
-        assert classify_voc.rule_classify("푸마 스피드캣 고 구매처 아시는분 ㅜ") is None
+        assert (
+            classify_voc.rule_classify("푸마 스피드캣 고 구매처 아시는분 ㅜ")
+            == "반응_문의"
+        )
+
+    @patch("classify_voc.urllib.request.urlopen")
+    def test_fetch_text_uses_response_charset(self, mock_urlopen):
+        import classify_voc
+
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = "재입고 되었어요".encode(
+            "cp949"
+        )
+        response.__enter__.return_value.headers.get_content_charset.return_value = (
+            "ms949"
+        )
+        mock_urlopen.return_value = response
+
+        text = classify_voc._fetch_text("https://example.com/post/1")
+
+        assert text == "재입고 되었어요"
+
+    def test_extract_article_text_rejects_low_quality_chrome_text(self):
+        import classify_voc
+
+        html = """
+        <div class="article viewer">
+          <p>게시판 목록 바로가기</p>
+          <p>본문 바로가기</p>
+          <p>내소식이 없습니다.</p>
+        </div>
+        """
+
+        assert classify_voc.extract_article_text(html) is None
 
     def test_build_classification_prompt(self):
         import classify_voc
@@ -291,6 +377,19 @@ class TestVocClassifier(unittest.TestCase):
             token in prompt for token in ["궁금", "교환", "구해", "가격", "성분"]
         )
         assert any(token in prompt for token in ["무배", "리셀", "핫딜", "신상"])
+        assert "반응_기타" not in prompt
+
+    def test_build_body_classification_prompt(self):
+        import classify_voc
+
+        prompt = classify_voc.build_body_classification_prompt(
+            "추천할만한지, 마감은 어떤지 궁금해요"
+        )
+        for category in VALID_CATEGORIES:
+            assert category in prompt
+        assert "반응_기타" not in prompt
+        assert "반응_구매추천" in prompt
+        assert "반응_구매비추천" in prompt
 
     def test_github_gpt41_adapter_request_format(self):
         import classify_voc
@@ -345,10 +444,21 @@ class TestVocClassifier(unittest.TestCase):
         assert classify_voc.validate_result("반응_교환") == "반응_교환"
         assert classify_voc.validate_result("반응_구해요") == "반응_구해요"
         assert classify_voc.validate_result("반응_정보") == "반응_정보"
-        assert classify_voc.validate_result("반응_기타") == "반응_기타"
-        assert classify_voc.validate_result("알 수 없음") == "반응_기타"
-        assert classify_voc.validate_result("") == "반응_기타"
-        assert classify_voc.validate_result("긍정_제품후기") == "반응_기타"
+        assert classify_voc.validate_result("반응_거래") == "반응_거래"
+        assert classify_voc.validate_result("반응_마감문의") == "반응_마감문의"
+        assert classify_voc.validate_result("반응_단순반응") == "반응_단순반응"
+        assert classify_voc.validate_result("반응_제품칭찬") == "반응_제품칭찬"
+        assert classify_voc.validate_result("반응_제품비판") == "반응_제품비판"
+        assert classify_voc.validate_result("반응_일반감상") == "반응_일반감상"
+        assert classify_voc.validate_result("반응_구매추천") == "반응_구매추천"
+        assert classify_voc.validate_result("반응_구매비추천") == "반응_구매비추천"
+        assert classify_voc.validate_result("반응_기타") == "반응_단순반응"
+        assert classify_voc.validate_result("알 수 없음") == "반응_단순반응"
+        assert classify_voc.validate_result("") == "반응_단순반응"
+        assert classify_voc.validate_result("긍정_제품후기") == "반응_정보"
+        assert classify_voc.validate_result("비추천") == "반응_구매비추천"
+        assert classify_voc.validate_result("(완료) 거래") == "반응_거래"
+        assert classify_voc.validate_result("마감이 별로인가요") == "반응_마감문의"
 
     def test_preprocess_title(self):
         import classify_voc
@@ -460,6 +570,50 @@ class TestVocClassifier(unittest.TestCase):
         assert 'mc:Ignorable="x14ac"' in patched_text
         assert 'x14ac:dyDescent="0.3"' in patched_text
 
+    def test_build_output_workbook_path_preserves_production_name(self):
+        import classify_voc
+
+        output_path = classify_voc.build_output_workbook_path(
+            Path("input/source.xlsx"), Path("output")
+        )
+
+        assert output_path == Path("output/source.xlsx")
+
+    def test_build_qa_artifact_workbook_path_uses_output_qa_subtree(self):
+        import classify_voc
+
+        output_path = classify_voc.build_qa_artifact_workbook_path(
+            Path("input/source.xlsx"),
+            artifact_name="manual-QA",
+            output_dir=Path("output"),
+        )
+
+        assert output_path == Path("output/qa/manual-QA/source.xlsx")
+
+    def test_build_qa_artifact_workbook_path_requires_artifact_name(self):
+        import classify_voc
+
+        with pytest.raises(ValueError, match="artifact_name is required"):
+            classify_voc.build_qa_artifact_workbook_path(
+                Path("input/source.xlsx"), artifact_name="   "
+            )
+
+    def test_build_qa_artifact_workbook_path_rejects_parent_segment(self):
+        import classify_voc
+
+        with pytest.raises(ValueError, match="single safe path segment"):
+            classify_voc.build_qa_artifact_workbook_path(
+                Path("input/source.xlsx"), artifact_name=".."
+            )
+
+    def test_build_qa_artifact_workbook_path_rejects_path_separator(self):
+        import classify_voc
+
+        with pytest.raises(ValueError, match="single safe path segment"):
+            classify_voc.build_qa_artifact_workbook_path(
+                Path("input/source.xlsx"), artifact_name="manual/qa"
+            )
+
     @patch("classify_voc.urllib.request.urlopen")
     def test_classify_item_rule_bypasses_api(self, mock_urlopen):
         import classify_voc
@@ -497,7 +651,7 @@ class TestVocClassifier(unittest.TestCase):
             link="https://example.com/post/1",
             api_key="test-key",
         )
-        assert category == "반응_기타"
+        assert category == "반응_단순반응"
         assert method == "article"
 
     @patch("classify_voc.urllib.request.urlopen")
@@ -540,7 +694,36 @@ class TestVocClassifier(unittest.TestCase):
             api_key="test-key",
         )
 
-        assert result == "반응_정보"
+        assert result == "반응_문의"
+
+    @patch("classify_voc.urllib.request.urlopen")
+    def test_classify_item_uses_article_when_models_fail(self, mock_urlopen):
+        import classify_voc
+
+        html = """
+        <div class="article viewer">
+          <p>에이치스트릿 재입고 되었어요.</p>
+        </div>
+        """
+
+        def side_effect(request, *args, **kwargs):
+            if getattr(request, "data", None) is None:
+                response = MagicMock()
+                response.__enter__.return_value.read.return_value = html.encode("cp949")
+                response.__enter__.return_value.headers.get_content_charset.return_value = "ms949"
+                return response
+            raise _http_error(request.full_url)
+
+        mock_urlopen.side_effect = side_effect
+
+        category, method = classify_voc._classify_item_with_method(
+            "애매한 제목",
+            link="https://example.com/post/1",
+            api_key="test-key",
+        )
+
+        assert category == "반응_정보"
+        assert method == "article"
 
     def test_read_target_rows_includes_link(self):
         import classify_voc
@@ -589,10 +772,10 @@ class TestVocClassifier(unittest.TestCase):
 
         rows = classify_voc.read_target_rows(wb)
 
-        assert len(rows) == 1
+        assert len(rows) == 2
         assert rows[0]["row"] == 5
         assert rows[0]["title"] == "이 제품 어디서 사나요"
-        assert all(item.get("row") != 6 for item in rows)
+        assert any(item.get("row") == 6 for item in rows)
 
     def test_write_classification_result(self):
         import classify_voc
@@ -787,7 +970,7 @@ def test_hybrid_pipeline_integration(mock_urlopen):
     pipeline(wb, api_key="test-key", output_path=None)
 
     assert ws.cell(5, 7).value == "반응_교환"
-    assert ws.cell(6, 7).value == "반응_정보"
+    assert ws.cell(6, 7).value == "반응_문의"
     assert mock_urlopen.call_count == 0
 
 
@@ -832,8 +1015,28 @@ def test_saved_output_preserves_media_on_real_workbook(mock_urlopen):
 
 
 @pytest.mark.integration
+def test_saved_output_reloads_supported_workbook_updates():
+    import classify_voc
+
+    src = _real_input_workbook()
+    updates = _build_legacy_baseline_updates(src)
+    expected_updates = _updates_by_sheet(updates)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = Path(tmpdir) / "supported-result.xlsx"
+        classify_voc.save_workbook_with_preserved_media(src, out, updates)
+
+        saved = openpyxl.load_workbook(out)
+
+    for sheet_name, cells in expected_updates.items():
+        ws = saved[sheet_name]
+        for cell_ref, expected_value in cells.items():
+            assert ws[cell_ref].value == expected_value
+
+
+@pytest.mark.integration
 @patch("classify_voc.urllib.request.urlopen")
-def test_saved_output_reloads_linked_card_updates(mock_urlopen):
+def test_saved_output_synthetic_workbook_with_linked_cards_hard_fails(mock_urlopen):
     import classify_voc
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -856,20 +1059,21 @@ def test_saved_output_reloads_linked_card_updates(mock_urlopen):
         )
 
         loaded = openpyxl.load_workbook(src)
-        classify_voc.run_classification(
-            loaded, api_key="test-key", output_path=out, source_path=src
-        )
+        with pytest.raises(classify_voc.UnsupportedWorkbookVariantError) as excinfo:
+            classify_voc.run_classification(
+                loaded, api_key="test-key", output_path=out, source_path=src
+            )
 
-        saved = openpyxl.load_workbook(out)
-
-    assert saved["2026 list"].cell(5, 7).value == "반응_문의"
-    assert saved["IB"].cell(5, 3).value == "반응_문의"
-    assert saved["BP_긍정"].cell(5, 21).value == "반응_문의"
+    assert excinfo.value.policy == "hard_fail"
+    assert excinfo.value.reason_code == "unsupported_sheet_count"
+    assert not out.exists()
 
 
 @pytest.mark.integration
 @patch("classify_voc.urllib.request.urlopen")
-def test_saved_output_without_linked_card_mapping_is_readable(mock_urlopen):
+def test_saved_output_synthetic_workbook_without_linked_card_mapping_hard_fails(
+    mock_urlopen,
+):
     import classify_voc
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -886,13 +1090,14 @@ def test_saved_output_without_linked_card_mapping_is_readable(mock_urlopen):
         )
 
         loaded = openpyxl.load_workbook(src)
-        classify_voc.run_classification(
-            loaded, api_key="test-key", output_path=out, source_path=src
-        )
+        with pytest.raises(classify_voc.UnsupportedWorkbookVariantError) as excinfo:
+            classify_voc.run_classification(
+                loaded, api_key="test-key", output_path=out, source_path=src
+            )
 
-        saved = openpyxl.load_workbook(out)
-
-    assert saved["2026 list"].cell(5, 7).value == "반응_정보"
+    assert excinfo.value.policy == "hard_fail"
+    assert excinfo.value.reason_code == "unsupported_sheet_count"
+    assert not out.exists()
 
 
 @pytest.mark.integration
@@ -1195,8 +1400,6 @@ def test_writable_surface_rejects_unknown_cell():
 def test_primary_writer_rejects_structural_edit():
     import classify_voc
 
-    xlsx_template_contract = importlib.import_module("xlsx_template_contract")
-
     src = _real_input_workbook()
     updates: list[classify_voc.CellUpdate] = [
         {
@@ -1208,10 +1411,11 @@ def test_primary_writer_rejects_structural_edit():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         out = Path(tmpdir) / "structural-edit.xlsx"
-        with pytest.raises(xlsx_template_contract.WorkbookContractError) as excinfo:
+        with pytest.raises(classify_voc.UnsupportedWorkbookVariantError) as excinfo:
             classify_voc.save_workbook_with_preserved_media(src, out, updates)
 
-    assert excinfo.value.code == "unsupported_write_cell"
+    assert excinfo.value.reason_code == "unsupported_write_cell"
+    assert excinfo.value.policy == "hard_fail"
 
 
 @pytest.mark.integration

@@ -1,5 +1,7 @@
 """VOC classification script using GitHub Models API."""
 
+# pyright: reportMissingModuleSource=false
+
 import argparse
 import html
 import importlib
@@ -31,7 +33,14 @@ VALID_CATEGORIES = {
     "반응_교환",
     "반응_구해요",
     "반응_정보",
-    "반응_기타",
+    "반응_거래",
+    "반응_마감문의",
+    "반응_단순반응",
+    "반응_제품칭찬",
+    "반응_제품비판",
+    "반응_일반감상",
+    "반응_구매추천",
+    "반응_구매비추천",
 }
 TARGET_SHEET = "2026 list"
 TARGET_MARKER = "반응_제품반응"
@@ -71,6 +80,99 @@ INFO_KEYWORDS = [
     "발매",
     "신상",
 ]
+INFO_SIGNAL_KEYWORDS = [
+    "품절",
+    "입고",
+    "재입고",
+    "오픈런",
+    "팝업",
+    "팝업스토어",
+    "재고",
+    "공홈",
+    "온라인",
+    "사이트",
+]
+INQUIRY_SIGNAL_KEYWORDS = [
+    "아시는분",
+    "아시나",
+    "알려",
+    "궁금",
+    "어떤",
+    "어때",
+    "될까",
+    "될까요",
+    "있을까요",
+    "있나요",
+    "계신가",
+    "봐주세요",
+    "조언",
+    "팁",
+    "문의",
+    "품번",
+    "사은품",
+    "골라주",
+    "질문",
+    "사이즈",
+]
+RECOMMEND_POSITIVE_TOKENS = [
+    "추천합니다",
+    "추천해",
+    "추천드려",
+    "추천템",
+    "강추",
+    "왕비추천",
+    "잘 샀",
+]
+RECOMMEND_NEGATIVE_TOKENS = [
+    "비추천",
+    "비추",
+    "사지 말",
+    "사지마",
+    "후회",
+    "피하세요",
+    "돈 아깝",
+]
+PRAISE_TOKENS = [
+    "만족",
+    "좋아요",
+    "좋았",
+    "예쁘",
+    "이쁘",
+    "맘에",
+    "괜찮",
+    "가볍",
+    "최고",
+    "추천후기",
+]
+CRITICISM_TOKENS = [
+    "불량",
+    "불편",
+    "실망",
+    "아쉽",
+    "별로",
+    "마감",
+    "문제",
+    "자국",
+    "내구성",
+    "구하기가 힘",
+]
+TRADE_COMPLETION_TOKENS = ["(완료)", "거래완료", "판매완료", "예약완료"]
+SIMPLE_REACTION_TOKENS = [
+    "이제 알겠",
+    "왜 가벼워야 하는지",
+    "한번 신겼는데",
+    "기뻐요",
+]
+LOW_QUALITY_ARTICLE_TOKENS = [
+    "게시판 목록 바로가기",
+    "본문 바로가기",
+    "웹 접근성이 좋은 모바일 웹",
+    "내소식이 없습니다",
+    "가입한 카페의 활동 알림",
+    "카페홈",
+    "가입카페",
+]
+LEGACY_TARGET_PREFIXES = ("긍정_", "부정_")
 
 NOTICE_PHRASES = ("회원간의 거래 분쟁에 대한 공론화 금지",)
 XML_NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -142,7 +244,7 @@ def preprocess_title(text) -> str | None:
 def build_classification_prompt(title) -> str:
     categories = "\n".join(f"- {item}" for item in sorted(VALID_CATEGORIES))
     return (
-        "당신은 VOC 제목을 아래 5개 카테고리 중 하나로만 분류하는 분류기입니다.\n"
+        "당신은 VOC 제목을 아래 카테고리 중 하나로만 분류하는 분류기입니다.\n"
         "카테고리 목록:\n"
         f"{categories}\n\n"
         "카테고리 분류 기준:\n"
@@ -150,12 +252,25 @@ def build_classification_prompt(title) -> str:
         "- 반응_구해요: [구해요] 태그, 구해요, 구합니다, 구해용, 구입하실분, 판매처 문의\n"
         "- 반응_문의: 직접 답변이나 조언을 요청하는 질문형 제목. 궁금, 질문, 어디서 사나요, ~인가요?, 있을까요?, 계신가요?\n"
         "- 반응_정보: 가격, 성분, 할인, 세일, 무배, 핫딜, 리셀, 발매, 신상, 구매 정보나 경험 정보를 공유하는 제목\n"
-        "- 반응_기타: 위 4개에 해당하지 않는 단순 감상, 후기, 추천, 비추천\n\n"
+        "- 반응_거래: 완료된 거래, 판매 완료, 예약 완료처럼 거래 상태가 끝난 제목\n"
+        "- 반응_마감문의: 제품 마감이나 품질 상태를 질문하는 제목\n"
+        "- 반응_단순반응: 짧은 감상, 리액션, 단순 소감\n"
+        "- 반응_제품칭찬: 제품의 품질/디자인/만족감을 긍정적으로 말하지만 직접 구매 권유는 아닌 경우\n"
+        "- 반응_제품비판: 제품의 품질/마감/불편/실망을 부정적으로 말하지만 직접 구매 비권유는 아닌 경우\n"
+        "- 반응_일반감상: 상품명 언급, 잡담, 단문 감상, 맥락이 약한 반응\n"
+        "- 반응_구매추천: 구매/착용/사용을 권하는 추천, 추천 요청에 대한 긍정 추천 맥락\n"
+        "- 반응_구매비추천: 사지 말라, 비추천, 후회, 피하라는 구매 비권유 맥락\n\n"
         "few-shot 예시:\n"
         '입력: "궁금합니다" -> 출력: 반응_문의\n'
         '입력: "어디서 사나요" -> 출력: 반응_문의\n'
+        '입력: "이거 옷 품번 아시나요?" -> 출력: 반응_문의\n'
         '입력: "구매처 아시는분" -> 출력: 반응_문의\n'
+        '입력: "(완료)베베드피노 몬치치 오버롤 90사이즈" -> 출력: 반응_거래\n'
+        '입력: "베베드피노 원래 마감이 좀 깔끔치 못한가요?" -> 출력: 반응_마감문의\n'
+        '입력: "가방 왜 가벼워야 하는지 이제 알겠네요..ㅠ" -> 출력: 반응_단순반응\n'
         '입력: "판매처 아시는분" -> 출력: 반응_구해요\n'
+        '입력: "푸마 에이치스트릿 품절풀렸어요" -> 출력: 반응_정보\n'
+        '입력: "푸마 에이치스트릿 에비씨마트 입고요" -> 출력: 반응_정보\n'
         '입력: "불량 수선받으신 맘님 계신가요" -> 출력: 반응_문의\n'
         '입력: "[교환] 교환해주세요" -> 출력: 반응_교환\n'
         '입력: "스피드캣 교환원해요" -> 출력: 반응_교환\n'
@@ -170,10 +285,17 @@ def build_classification_prompt(title) -> str:
         '입력: "크림 리셀가 공유" -> 출력: 반응_정보\n'
         '입력: "최대 80% 할인 핫딜" -> 출력: 반응_정보\n'
         '입력: "신상 발매 정보" -> 출력: 반응_정보\n'
-        '입력: "왕비추천" -> 출력: 반응_기타\n'
-        '입력: "베베드피노 몬치치가방" -> 출력: 반응_기타\n\n'
+        '입력: "왕비추천" -> 출력: 반응_구매추천\n'
+        '입력: "이건 진짜 비추천" -> 출력: 반응_구매비추천\n'
+        '입력: "베베드피노 원래 마감이 좀 깔끔치 못한가요?" -> 출력: 반응_마감문의\n'
+        '입력: "가방 왜 가벼워야 하는지 이제 알겠네요..ㅠ" -> 출력: 반응_단순반응\n'
+        '입력: "베베드피노 몬치치가방" -> 출력: 반응_일반감상\n\n'
         "중요: [교환] 또는 [구해요] 태그가 있으면 해당 카테고리로 분류하세요.\n"
         "중요: 가격/세일/무배/리셀/핫딜/발매/신상처럼 정보를 공유하는 제목은 질문형 어미가 섞여도 반응_정보를 우선 검토하세요.\n"
+        "중요: 구매를 권하면 반응_구매추천, 사지 말라고 하면 반응_구매비추천을 우선하세요.\n"
+        "중요: 질문형 제목은 감상보다 반응_문의를 우선 검토하세요.\n"
+        "중요: 긍정 평가지만 직접 권유는 없으면 반응_제품칭찬, 부정 평가지만 직접 비권유는 없으면 반응_제품비판입니다.\n"
+        "중요: 정말 애매하거나 맥락이 약한 단문만 반응_일반감상으로 분류하세요.\n"
         "반드시 카테고리 텍스트 하나만 출력하세요.\n"
         f"분류 대상 제목: {title}"
     )
@@ -182,7 +304,7 @@ def build_classification_prompt(title) -> str:
 def build_body_classification_prompt(text) -> str:
     categories = "\n".join(f"- {item}" for item in sorted(VALID_CATEGORIES))
     return (
-        "당신은 VOC 본문을 아래 5개 카테고리 중 하나로만 분류하는 분류기입니다.\n"
+        "당신은 VOC 본문을 아래 카테고리 중 하나로만 분류하는 분류기입니다.\n"
         "카테고리 목록:\n"
         f"{categories}\n\n"
         "카테고리 기준:\n"
@@ -190,7 +312,17 @@ def build_body_classification_prompt(text) -> str:
         "- 반응_구해요: 구매 희망, 구합니다, 구해요, 판매처 수배\n"
         "- 반응_문의: 직접 답변이나 조언을 구하는 질문\n"
         "- 반응_정보: 가격, 할인, 무배, 리셀, 발매, 신상, 경험/상황 공유\n"
-        "- 반응_기타: 감상, 잡담, 단순 반응\n"
+        "- 반응_거래: 거래 완료, 판매 완료, 거래 성사\n"
+        "- 반응_마감문의: 제품 마감/품질 상태를 묻는 질문\n"
+        "- 반응_단순반응: 짧은 소감, 리액션, 감상\n"
+        "- 반응_제품칭찬: 만족, 칭찬, 품질/디자인 장점\n"
+        "- 반응_제품비판: 실망, 마감 문제, 불편, 품질 단점\n"
+        "- 반응_일반감상: 감상, 잡담, 맥락 부족\n"
+        "- 반응_구매추천: 사도 된다, 추천한다, 추천템, 잘 샀다\n"
+        "- 반응_구매비추천: 비추천, 사지 마라, 후회, 돈 아깝다\n"
+        "중요: 구매 권유는 반응_구매추천, 구매 비권유는 반응_구매비추천을 우선하세요.\n"
+        "중요: 긍정 평가는 반응_제품칭찬, 부정 평가는 반응_제품비판으로 분류하세요.\n"
+        "중요: 정말 애매하거나 맥락이 약할 때만 반응_일반감상으로 분류하세요.\n"
         "본문에는 공지와 배너가 제거되어 있을 수 있습니다. 실제 게시글 본문 의미만 보고 분류하세요.\n"
         "반드시 카테고리 텍스트 하나만 출력하세요.\n"
         f"분류 대상 본문: {text}"
@@ -201,10 +333,59 @@ def validate_result(text) -> str:
     value = (text or "").strip()
     if value in VALID_CATEGORIES:
         return value
+    if not value or "반응_기타" in value:
+        return "반응_단순반응"
     for cat in VALID_CATEGORIES:
         if cat in value:
             return cat
-    return "반응_기타"
+    if any(token in value for token in TRADE_COMPLETION_TOKENS):
+        return "반응_거래"
+    if "마감" in value:
+        return "반응_마감문의"
+    purchase_negative_tokens = (
+        "비추천",
+        "비추",
+        "사지 말",
+        "사지마",
+        "후회",
+        "피하세요",
+    )
+    purchase_positive_tokens = ("추천", "추천해", "추천합", "추천템", "사세요", "잘 샀")
+    negative_tokens = (
+        "불량",
+        "불편",
+        "실망",
+        "아쉽",
+        "별로",
+        "마감",
+        "문제",
+        "부정_제품",
+        "부정",
+    )
+    positive_tokens = (
+        "만족",
+        "좋아요",
+        "좋았",
+        "예쁘",
+        "이쁘",
+        "맘에",
+        "괜찮",
+        "가볍",
+        "긍정_제품",
+        "긍정",
+        "후기",
+    )
+    if any(token in value for token in purchase_negative_tokens):
+        return "반응_구매비추천"
+    if any(token in value for token in purchase_positive_tokens):
+        return "반응_구매추천"
+    if any(token in value for token in SIMPLE_REACTION_TOKENS):
+        return "반응_단순반응"
+    if any(token in value for token in negative_tokens):
+        return "반응_제품비판"
+    if any(token in value for token in positive_tokens):
+        return "반응_정보"
+    return "반응_단순반응"
 
 
 def _request_json(url: str, body: dict[str, Any], api_key: str) -> dict[str, Any]:
@@ -266,26 +447,116 @@ def _classify_with_adapter(adapter, title) -> str | None:
             time.sleep(backoff)
             backoff *= 2
         except (KeyError, IndexError, TypeError, ValueError):
-            return "반응_기타"
+            return "반응_일반감상"
         finally:
             time.sleep(0.5)
     return None
 
 
-def rule_classify(title: str) -> str | None:
-    lower = title.lower()
+def heuristic_reaction_classify(text: str, allow_general: bool = False) -> str | None:
+    cleaned = preprocess_title(text)
+    if cleaned is None:
+        return "반응_단순반응" if allow_general else None
+
+    lower = cleaned.lower()
+
+    if any(token in cleaned for token in TRADE_COMPLETION_TOKENS):
+        return "반응_거래"
+
+    if "마감" in cleaned and (
+        "?" in cleaned or any(token in cleaned for token in INQUIRY_SIGNAL_KEYWORDS)
+    ):
+        return "반응_마감문의"
+
+    if any(token in cleaned for token in SIMPLE_REACTION_TOKENS):
+        return "반응_단순반응"
+
+    if cleaned.startswith("[교환]") and re.search(r"<->|->|→", cleaned):
+        return "반응_문의"
+    if cleaned.startswith("[구해요]") and "소환" in cleaned:
+        return "반응_문의"
+    if "구매 성공" in cleaned:
+        return "반응_정보"
+
     for kw in EXCHANGE_KEYWORDS:
         if kw.lower() in lower:
             return "반응_교환"
+    if re.search(r"(교환|맞교환)", cleaned):
+        return "반응_교환"
+    if re.search(r"(\d{2,3})\s*(?:<->|->|→|>|<)\s*(\d{2,3})", cleaned):
+        return "반응_교환"
+
     for kw in SEEKING_KEYWORDS:
         if kw.lower() in lower:
             return "반응_구해요"
-    if re.search(r"\b\d[\d,]*원\b", title):
+    if any(
+        token in cleaned for token in ("구합", "구해봅", "찾으시는분", "찾아", "찾고")
+    ):
+        return "반응_구해요"
+
+    if any(token in cleaned for token in RECOMMEND_NEGATIVE_TOKENS):
+        return "반응_구매비추천"
+    if any(token in cleaned for token in RECOMMEND_POSITIVE_TOKENS):
+        return "반응_구매추천"
+
+    if any(
+        token in cleaned
+        for token in ("다른거추천", "추천부탁", "추천 부탁", "추천해주세요", "추천해주")
+    ):
+        return "반응_문의"
+
+    if cleaned.startswith("무신사)"):
+        return "반응_문의"
+
+    if any(
+        token in cleaned
+        for token in (
+            "온라인",
+            "공홈",
+            "오프라인",
+            "재고있는곳",
+            "품절될까요",
+            "구매하신분들",
+            "베이비",
+            "깔창 두개",
+            "살 수 있을까요",
+            "사이트 알려",
+        )
+    ):
+        return "반응_문의"
+
+    if "?" in cleaned or any(token in cleaned for token in INQUIRY_SIGNAL_KEYWORDS):
+        return "반응_문의"
+
+    if re.search(r"\b\d[\d,]*원\b", cleaned):
         return "반응_정보"
-    for kw in INFO_KEYWORDS:
+    for kw in INFO_KEYWORDS + INFO_SIGNAL_KEYWORDS:
         if kw.lower() in lower:
             return "반응_정보"
-    return None
+
+    if any(token in cleaned for token in CRITICISM_TOKENS):
+        return "반응_제품비판"
+    if any(token in cleaned for token in PRAISE_TOKENS):
+        return "반응_정보"
+
+    if any(
+        token in cleaned
+        for token in (
+            "푸마",
+            "베베드피노",
+            "스피드캣",
+            "에이치스트릿",
+            "몬치치",
+            "h-street",
+        )
+    ):
+        return "반응_문의"
+
+    return "반응_단순반응" if allow_general else None
+
+
+def rule_classify(title: str) -> str | None:
+    return heuristic_reaction_classify(title, allow_general=False)
 
 
 def _extract_link_text(cell) -> str:
@@ -307,15 +578,27 @@ def _fetch_text(url: str) -> str | None:
     try:
         with urllib.request.urlopen(req) as resp:
             data = resp.read()
+            response_charset = resp.headers.get_content_charset()
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
         return None
 
     if not data:
         return None
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        return data.decode("utf-8", errors="ignore")
+    encodings = [
+        response_charset if isinstance(response_charset, str) else None,
+        "utf-8",
+        "cp949",
+        "ms949",
+        "euc-kr",
+    ]
+    for encoding in encodings:
+        if not encoding:
+            continue
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="ignore")
 
 
 def extract_article_text(html_text: str) -> str | None:
@@ -356,10 +639,20 @@ def extract_article_text(html_text: str) -> str | None:
     text = re.sub(r"\n+", "\n", text)
     text = re.sub(r"[ \t]+", " ", text)
     cleaned = text.strip()
-    return cleaned or None
+    if not cleaned:
+        return None
+    if cleaned.count("/") > 80:
+        return None
+    if any(token in cleaned for token in LOW_QUALITY_ARTICLE_TOKENS):
+        return None
+    return cleaned
 
 
 def classify_article_text(text: str, api_key: str) -> str | None:
+    heuristic_result = heuristic_reaction_classify(text, allow_general=False)
+    if heuristic_result is not None:
+        return heuristic_result
+
     primary_result = _classify_with_adapter(
         GithubModelsAdapter(
             api_key=api_key,
@@ -370,7 +663,7 @@ def classify_article_text(text: str, api_key: str) -> str | None:
     )
     if primary_result is not None:
         return primary_result
-    return _classify_with_adapter(
+    fallback_result = _classify_with_adapter(
         GithubModelsAdapter(
             api_key=api_key,
             model="openai/gpt-4o",
@@ -378,6 +671,9 @@ def classify_article_text(text: str, api_key: str) -> str | None:
         ),
         text,
     )
+    if fallback_result is not None:
+        return fallback_result
+    return heuristic_reaction_classify(text, allow_general=True)
 
 
 def classify_from_article(link: str | None, api_key: str) -> str | None:
@@ -432,7 +728,7 @@ def _classify_item_with_method(
 ) -> tuple[str, str]:
     cleaned = preprocess_title(title)
     if cleaned is None:
-        return "반응_기타", "empty"
+        return "반응_단순반응", "empty"
 
     rule_result = rule_classify(cleaned)
     if rule_result is not None:
@@ -441,23 +737,31 @@ def _classify_item_with_method(
     primary_result = _classify_with_adapter(
         GithubModelsAdapter(api_key=api_key, model="openai/gpt-4.1"), cleaned
     )
-    if primary_result is not None and primary_result != "반응_기타":
+    if primary_result is not None and primary_result not in {
+        "반응_일반감상",
+        "반응_단순반응",
+    }:
         return primary_result, "llm"
 
-    if primary_result == "반응_기타" and link:
+    if link and primary_result in (None, "반응_일반감상", "반응_단순반응"):
         article_result = classify_from_article(link, api_key)
-        if article_result is not None and article_result != "반응_기타":
+        if article_result is not None and article_result not in {
+            "반응_일반감상",
+            "반응_단순반응",
+        }:
+            return article_result, "article"
+        if article_result in {"반응_일반감상", "반응_단순반응"}:
             return article_result, "article"
 
-    if primary_result == "반응_기타":
-        return "반응_기타", "article"
+    if primary_result in {"반응_일반감상", "반응_단순반응"}:
+        return primary_result, "article"
 
     fallback_result = _classify_with_adapter(
         GithubModelsAdapter(api_key=api_key, model="openai/gpt-4o"), cleaned
     )
     if fallback_result is not None:
         return fallback_result, "fallback"
-    return "반응_기타", "fallback"
+    return "반응_단순반응", "fallback"
 
 
 def classify_item(
@@ -477,7 +781,11 @@ def read_target_rows(wb) -> list[TargetRow]:
     ws = wb[TARGET_SHEET]
     targets = []
     for row in range(START_ROW, END_ROW + 1):
-        if ws.cell(row, TARGET_COLUMN).value != TARGET_MARKER:
+        current_value = ws.cell(row, TARGET_COLUMN).value
+        if current_value != TARGET_MARKER and not (
+            isinstance(current_value, str)
+            and current_value.startswith(LEGACY_TARGET_PREFIXES)
+        ):
             continue
         title = preprocess_title(ws.cell(row, TITLE_COLUMN).value)
         if title is None:
@@ -1143,6 +1451,34 @@ def classify_workbook(wb, api_key, output_path, source_path: Path | None = None)
 
 
 INPUT_DIR = Path("input")
+DEFAULT_OUTPUT_DIR = Path("output")
+QA_ARTIFACT_SUBDIR = "qa"
+
+
+def build_output_workbook_path(
+    input_path: Path, output_dir: Path = DEFAULT_OUTPUT_DIR
+) -> Path:
+    return Path(output_dir) / input_path.name
+
+
+def build_qa_artifact_workbook_path(
+    input_path: Path,
+    artifact_name: str,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+) -> Path:
+    normalized_artifact_name = artifact_name.strip()
+    if not normalized_artifact_name:
+        raise ValueError("artifact_name is required for QA artifacts")
+    if normalized_artifact_name in {".", ".."} or any(
+        separator in normalized_artifact_name for separator in ("/", "\\")
+    ):
+        raise ValueError("artifact_name must be a single safe path segment")
+    return (
+        Path(output_dir)
+        / QA_ARTIFACT_SUBDIR
+        / normalized_artifact_name
+        / input_path.name
+    )
 
 
 def _find_input_xlsx() -> Path | None:
@@ -1190,7 +1526,7 @@ def main(argv=None) -> int:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / input_path.name
+    output_path = build_output_workbook_path(input_path, output_dir)
 
     wb = openpyxl.load_workbook(input_path)
     if args.dry_run:
