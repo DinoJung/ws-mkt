@@ -13,57 +13,69 @@ triggers:
 
 ## Purpose
 
-Handle the result-writing stage of the VOC classification pipeline. This skill manages:
-- Writing computed category values to column 7 (TARGET_COLUMN) in the classified worksheet
-- Preserving the original input file (never modified in-place)
-- Saving the completed workbook to `output/<filename>`
-- Maintaining all sheets in the workbook during output
-- Printing classification summary with category counts
+Use this skill when the user asks this AI to complete the result-writing stage of the VOC pipeline. In the current runtime model, this AI is responsible for:
 
-Reference: [`docs/voc-classification-workflow.md §2`](docs/voc-classification-workflow.md) "입력/출력 규칙" for I/O path rules and [`§6`](docs/voc-classification-workflow.md) "실행 순서" steps 6–8 for execution sequence.
+- collecting deterministic workbook updates from classification results
+- preserving the original input workbook in-place
+- writing the production result workbook to `output/<input_filename>` through the preservation writer
+- keeping QA artifact paths separate under `output/qa/<artifact_name>/<input_filename>`
+- reporting where the production result lives and whether any OMV mirror copy was performed as a procedural follow-up
+
+Reference: [`docs/voc-classification-workflow.md §2`](docs/voc-classification-workflow.md) for I/O path rules and [`§7`](docs/voc-classification-workflow.md) for execution order.
 
 ## When to Activate
 
 Activate this skill when:
-- Classification results need to be written to Excel cells
-- Output must be saved to a separate file in the `output/` directory
-- You need to ensure the original file remains untouched
-- A summary report of classification counts is required
+- the user asks this AI to write VOC classification results into the workbook output
+- output locations need to be explained or verified
+- production output and QA artifact boundaries must be kept distinct
+- you need to confirm that the preservation writer, not legacy openpyxl save behavior, is the active output path
 
 ## Workflow
 
-### Writing Results
-The `write_classification_result(wb, row, category)` function writes a validated category string to the target cell at `ws.cell(row, TARGET_COLUMN)` where TARGET_COLUMN = 7. The input category is validated against VALID_CATEGORIES before writing.
+### Result Collection
+This AI should treat classification output as a collected update set, not as “save whatever the in-memory workbook currently looks like.”
 
-### Processing Flow
-`run_classification(wb, api_key, output_path)` orchestrates the full result-writing pipeline:
-1. Builds image index from VOC sheets for vision-based fallback
-2. Collects all target rows where col 7 contains "반응_제품반응"
-3. Iterates through each row (1 to total count)
-4. Calls `write_classification_result()` to write category to col 7
-5. Increments category count in summary dictionary
-6. Prints progress: `[idx/total] row=N (method) -> category`
-7. After all rows processed, saves workbook to output_path via `wb.save(output_path)`
-8. Outputs summary report showing counts per category
+- `collect_classification_updates(wb, api_key)` gathers:
+  - `2026 list` target-cell writes
+  - linked-card fan-out updates
+  - summary counts per final category
 
-### Output Structure
-- **Input file**: Original `.xlsx` file (never modified)
-- **Output path**: `output/<input_filename>` (created by `--output-dir` argument, defaults to `output/`)
-- **Sheets preserved**: All sheets from input workbook are present in output
-- **Target sheet**: `2026 list` with classifications written to col 7
+### Output Writing
+When the user asks for a real output workbook, the runtime path is:
+
+1. `run_classification(...)` collects updates and summary data
+2. `save_workbook_with_preserved_media(source_path, output_path, updates)` selects the supported writer contract
+3. `select_output_writer(...)` validates workbook-family support and writable-surface rules
+4. `_write_workbook_value_only_copy(...)` copies the source `.xlsx` archive and patches only allowed worksheet values
+
+This means the authoritative production output is the preserved copy at `output/<input_filename>`, not a legacy `wb.save(output_path)` write.
+
+### Output Boundaries
+- **Input file**: original `.xlsx`, never overwritten in place
+- **Production output**: `output/<input_filename>`
+- **QA artifact output**: `output/qa/<artifact_name>/<input_filename>`
+- **OMV mirror**: `/mnt/omv/.j2nu/ws-mkt/voc/result/<input_filename>` only when this AI performs the extra procedural copy after the production output exists
+
+Important boundary: OMV mirroring is currently a workflow/procedure step performed by this AI after output creation. It is not yet an automatic runtime write inside `classify_voc.py`.
 
 ### Top-level Entry Point
-`classify_workbook(wb, api_key, output_path)` is the wrapper that delegates to `run_classification()`. In typical usage, the CLI loads the workbook, creates output directory, and calls this function.
+`classify_workbook(wb, api_key, output_path, source_path=...)` delegates to `run_classification(...)`. When the user asks this AI to complete a real run, this AI should validate:
+
+- source workbook path
+- output path chosen by `build_output_workbook_path(...)`
+- whether any QA artifact path is intentionally requested via `build_qa_artifact_workbook_path(...)`
+- whether OMV mirroring should be performed as the post-run copy step
 
 ## Verification
 
-To confirm result writing completed successfully:
+To confirm result writing completed successfully, this AI should verify all applicable layers:
 
 ```bash
-# Check output file exists
-test -f output/input_filename.xlsx && echo "Output file created" || echo "FAIL"
+# Production output exists
+test -f output/input_filename.xlsx && echo "Production output created" || echo "FAIL"
 
-# Verify workbook has classifications
+# Output workbook is readable and contains written classifications
 python3 -c "
 import openpyxl
 wb = openpyxl.load_workbook('output/input_filename.xlsx')
@@ -72,12 +84,15 @@ classified_count = sum(1 for r in range(5, 221) if ws.cell(r, 7).value and ws.ce
 print(f'Classifications written: {classified_count}')
 "
 
-# Verify original file untouched
+# Optional: QA artifact path stays segregated
 python3 -c "
-import openpyxl
-wb = openpyxl.load_workbook('original_input.xlsx')
-ws = wb['2026 list']
-marker_count = sum(1 for r in range(5, 221) if ws.cell(r, 7).value == '반응_제품반응')
-print(f'Original file markers: {marker_count} (should be unchanged)')
+from pathlib import Path
+print(Path('output/qa/manual-QA/input_filename.xlsx'))
 "
 ```
+
+Expected verification outcome:
+- production output is present under `output/`
+- original input workbook remains untouched
+- QA artifacts, when used, stay under `output/qa/`
+- OMV mirror, when requested by workflow, is reported separately from production output rather than being confused with the runtime writer itself

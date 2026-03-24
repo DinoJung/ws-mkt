@@ -15,99 +15,71 @@ triggers:
 
 ## Purpose
 
-Activate this skill to run comprehensive QA verification for the VOC classification pipeline. The `voc-test` workflow validates both unit and integration tests, verifies API fallback mechanisms, and ensures the hybrid classification pipeline works correctly with mock-based assertions.
+Use this skill when the user asks this AI to verify the VOC pipeline. The expected operating model is that this AI executes the relevant checks, captures the output, and reports the result back to the user instead of telling the user to run pytest manually.
 
-**목적 (Korean):** VOC 분류 파이프라인의 모든 테스트를 자동으로 실행하고 검증합니다. 규칙 기반 분류, LLM 제목 분류, 이미지 OCR 재분류, 그리고 API 에러 폴백 로직을 검증합니다.
+**목적 (Korean):** 사용자가 검증을 요청하면, 이 AI가 VOC 분류 파이프라인 테스트와 관련 검증을 직접 실행하고 결과를 보고합니다.
 
-Reference: [`docs/voc-classification-workflow.md §8`](docs/voc-classification-workflow.md) "검증 체크리스트" for test execution procedures and [`§9`](docs/voc-classification-workflow.md) "장애 대응 메모" for 429 error and failure handling.
+Reference: [`docs/voc-classification-workflow.md §9`](docs/voc-classification-workflow.md) for verification guidance and failure handling notes.
 
 ## When to Activate
 
-- After modifying `classify_voc.py` or test logic
-- Before committing changes to the VOC pipeline
-- When validating API retry/fallback behavior (429 rate limit scenarios)
-- When verifying hybrid classification output (rule → LLM → image OCR fallback)
-- During CI/CD pipeline as regression validation
-- To ensure `openpyxl` workbook mutations don't corrupt original files
+- after modifying `classify_voc.py` or test logic
+- before finalizing a VOC change set
+- when validating API retry/fallback behavior
+- when checking that workbook preservation/output behavior still matches expectations
+- when the user asks whether a VOC change is safe to proceed with
 
 ## Workflow
 
-### 1. Full Test Suite
+### 1. Full VOC Test Suite
+When the user asks for full regression, this AI runs the repository's current VOC test suite and reports the real outcome.
 
-**Command:**
+Reference command executed by this AI:
+
 ```bash
 cd /home/ws-mkt/voc
 python3 -m pytest test_classify_voc.py -v
 ```
 
-Runs all 24 tests (19 unit + 5 integration):
-- `TestVocClassifier::test_rule_classify_*` — rule-based classification
-- `TestVocClassifier::test_github_gpt*_adapter_*` — API adapter format/parsing
-- `TestVocClassifier::test_classify_pipeline_with_mock_api` — full integration
-- `TestVocClassifier::test_hybrid_pipeline_integration` — rule → LLM hybrid flow
-- `TestVocClassifier::test_api_error_fallback_full_pipeline` — GPT-4.1 → GPT-4o fallback
+Do not hardcode an expected fixed test count in the skill text. The authoritative requirement is that the current suite passes with zero failures.
 
-### 2. Integration Tests Only
+### 2. Targeted Verification
+When a change only affects part of the workflow, this AI can run focused subsets and explain why that subset is sufficient before moving to broader verification.
 
-**Command:**
+Reference commands executed by this AI:
+
 ```bash
 python3 -m pytest test_classify_voc.py -v -m integration
-```
-
-Validates 5 integration markers:
-- `test_classify_pipeline_with_mock_api`
-- `test_output_preserves_all_sheets`
-- `test_classification_summary`
-- `test_api_error_fallback_full_pipeline`
-- `test_hybrid_pipeline_integration`
-
-### 3. Rule-Based Classification Tests
-
-**Command:**
-```bash
 python3 -m pytest test_classify_voc.py -v -k "rule"
-```
-
-Tests keywords `[교환]` and `[구해요]` are caught before API calls.
-
-### 4. Image & Vision Tests
-
-**Command:**
-```bash
 python3 -m pytest test_classify_voc.py -v -k "image"
-```
-
-Validates image encoding, base64 conversion, and vision payload structure.
-
-### 5. Fallback & Error Handling Tests
-
-**Command:**
-```bash
 python3 -m pytest test_classify_voc.py -v -k "fallback"
 ```
 
-Confirms HTTP errors trigger GPT-4.1 → GPT-4o retry mechanism.
+### 3. What This AI Must Report
+After running verification, this AI should report:
+
+- which command or subset was executed
+- whether it passed or failed
+- any relevant failure output or mismatch
+- whether broader verification is still needed
+
+### 4. Expected Test Behavior
+- no real API calls in mocked tests
+- no required user action during the normal verification flow
+- original input workbooks remain untouched
+- targeted checks are acceptable only when they are explicitly tied to the changed scope
 
 ## Verification
 
-### Success Criteria
+Success means the checks actually executed by this AI complete with zero unexpected failures.
 
-All tests pass with zero failures:
+Example evidence this AI should be able to report:
+
+```text
+- Full suite command executed successfully
+- Targeted subset command executed successfully
+- No new failures introduced by the current change
 ```
-collected 24 items
-test_classify_voc.py::TestVocClassifier::test_rule_classify_exchange PASSED
-test_classify_voc.py::TestVocClassifier::test_rule_classify_seeking PASSED
-...
-test_classify_voc.py::test_hybrid_pipeline_integration PASSED
-=================== 24 passed in X.XXs ====================
-```
-
-### Expected Test Behavior
-
-- **No real API calls** — all tests use mock (unittest.mock.patch)
-- **No GITHUB_TOKEN required** — mocks intercept urllib.request.urlopen
-- **Workbook mutations are in-memory** — original input not modified
-- **Fast execution** — all 24 tests complete in < 5 seconds
 
 ## Troubleshooting
 
@@ -115,24 +87,23 @@ test_classify_voc.py::test_hybrid_pipeline_integration PASSED
 
 **Symptom:** `HTTPError: 429 Client Error`
 
-**Root Cause:** GitHub Models API rate limit exceeded (e.g., running real pipeline against live API)
+**Root Cause:** GitHub Models API rate limit exceeded during a real run or a non-mocked path.
 
 **Fix:**
-1. Check retry policy in `_classify_with_adapter()` — should have 3 retries with exponential backoff (1s → 2s → 4s)
-2. Add delay between classifications: `import time; time.sleep(1)` between API calls
-3. For tests, verify mocks are applied: `@patch("classify_voc.urllib.request.urlopen")`
+1. Check retry policy in `_classify_with_adapter()`.
+2. Reduce repeated live calls before retrying.
+3. Confirm that mocked tests are actually using `@patch("classify_voc.urllib.request.urlopen")`.
 
 ### Missing GITHUB_TOKEN Environment Variable
 
-**Symptom:** `KeyError: 'GITHUB_TOKEN'` in classify_voc.py
+**Symptom:** `KeyError: 'GITHUB_TOKEN'` in `classify_voc.py`
 
-**Root Cause:** API key not loaded from `.env` file
+**Fix reference command executed by this AI:**
 
-**Fix:**
 ```bash
 cd /home/ws-mkt/voc
 set -a && . ./.env && set +a
-echo $GITHUB_TOKEN  # verify loaded
+echo $GITHUB_TOKEN
 python3 -m pytest test_classify_voc.py -v
 ```
 
@@ -140,11 +111,11 @@ python3 -m pytest test_classify_voc.py -v
 
 **Symptom:** `ModuleNotFoundError: No module named 'openpyxl'`
 
-**Fix:**
+**Fix reference command executed by this AI:**
+
 ```bash
 pip install -r /home/ws-mkt/voc/requirements.txt
-# or
-pip install openpyxl
 ```
 
-**마지막 수정:** 2026-03-10 | **테스트 클래스:** TestVocClassifier | **통합 테스트 마커:** @pytest.mark.integration
+### Reporting Rule
+This skill is not complete until this AI reports actual command output or actual pass/fail status. "This should pass" is not evidence.
