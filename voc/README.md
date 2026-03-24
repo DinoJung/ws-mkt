@@ -10,9 +10,10 @@ This directory contains the VOC classification workflow for reading a source Exc
 
 ## Basic run flow
 
-1. Put the source workbook in `input/` or point the script at another local `.xlsx` path.
-2. Run `classify_voc.py` with the workbook path.
-3. Review the generated workbook in `output/`.
+1. Put the source workbook in `input/` or tell this AI which local `.xlsx` file to use.
+2. Ask this AI to run the VOC workflow.
+3. This AI performs dry-run, full execution, verification, and result reporting.
+4. Review the generated production workbook in `output/` and, when requested by workflow, the mirrored copy under `/mnt/omv/.j2nu/ws-mkt/voc/result/`.
 
 ## Windows Compatibility & Release Gating
 
@@ -24,7 +25,9 @@ The `.xlsx` output is generated on Linux for performance. To ensure compatibilit
 - Reference: `.sisyphus/plans/xlsx-output-compat-performance.md` Task 8.
 
 
-## Example
+## Reference command example
+
+Normal operation does not require the user to run the command below directly. This is only a reference for what this AI executes internally when needed.
 
 ```bash
 cd /home/ws-mkt/voc

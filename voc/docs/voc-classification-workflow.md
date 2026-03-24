@@ -17,7 +17,12 @@
 - 연결 카드 갱신 규칙:
   - `col 11` 링크와 같은 링크를 가진 카드가 workbook 내 다른 시트에 있으면 해당 카드의 `반응_제품반응`도 같은 최종 분류값으로 변경한다.
   - 동일 링크가 여러 카드에 연결되어 있으면 전부 갱신한다.
-- 출력 파일: `output/<입력파일명>`
+- 운영 출력 파일: `output/<입력파일명>`
+- QA/수동 검증 아티팩트: 운영 결과와 섞지 않고 `output/qa/<artifact_name>/<입력파일명>` 규칙을 사용한다.
+- OMV mirror: 사용자가 요청한 실제 운영 실행에서 이 AI가 후처리로 `/mnt/omv/.j2nu/ws-mkt/voc/result/<입력파일명>`에 동일한 main 결과물을 추가 복사할 수 있다. 이는 현재 procedural step이며 runtime writer 자체는 아니다.
+- 출력 writer 계약:
+  - 지원된 workbook family + 허용된 writable surface(`2026 list` G열, 링크 기반 카드 분류 셀)만 value-only patch writer로 저장한다.
+  - 지원되지 않는 workbook variant(예: 시트 수/상태/토폴로지 drift, 허용되지 않은 셀 쓰기)는 fallback 저장 없이 즉시 hard-fail 한다.
 
 ## 3) 하이브리드 분류 로직 (수정 후)
 
@@ -87,19 +92,24 @@
 - 참고: 현재 구현은 순차 처리이며, 운영 시 병렬화가 필요하면 동시 2건 제한으로 확장 가능
 
 ## 7) 실행 순서
-1. 환경변수 로드 (`GITHUB_TOKEN`)
-2. 입력 workbook 로드
-3. 링크 기반 카드 위치 인덱스 생성 (`build_card_index` 성격의 단계)
-4. 대상 row 수집 (`read_target_rows`)
-5. 각 row에 대해 규칙 기반 분류 수행
-6. 규칙 미분류 건에 대해 제목 LLM 분류 수행
-7. 결과가 `반응_기타`이면 링크 본문 fetch / 본문 추출 / 공지 제거 / 본문 재분류 수행
-8. 최종 분류값을 `2026 list` col `7`에 기록
-9. 같은 링크를 가진 카드 영역의 `반응_제품반응`도 동일 값으로 기록
-10. 분류 요약 출력
-11. `output/`에 저장
+정상 운영 경로에서는 사용자가 직접 명령어를 실행하지 않고, 이 AI에게 작업을 요청한다. 그러면 이 AI가 아래 순서를 수행하고 결과를 보고한다.
 
-## 8) 운영 실행 명령어
+1. 환경변수와 실행 전제를 확인한다 (`GITHUB_TOKEN`, 의존성, 입력 파일 위치).
+2. 입력 workbook을 로드한다.
+3. 링크 기반 카드 위치 인덱스를 생성한다 (`build_card_index` 성격의 단계).
+4. 대상 row를 수집한다 (`read_target_rows`).
+5. 각 row에 대해 규칙 기반 분류를 수행한다.
+6. 규칙 미분류 건에 대해 제목 LLM 분류를 수행한다.
+7. 결과가 `반응_기타`이면 링크 본문 fetch / 본문 추출 / 공지 제거 / 본문 재분류를 수행한다.
+8. 최종 분류값을 `2026 list` col `7`과 연결 카드 영역에 반영한다.
+9. 분류 요약을 출력한다.
+10. 운영 결과를 `output/<입력파일명>`에 저장한다.
+11. 필요 시 QA 전용 복사본/검증 산출물은 `output/qa/<artifact_name>/<입력파일명>`에 저장한다.
+12. workflow가 요구하면 이 AI가 `/mnt/omv/.j2nu/ws-mkt/voc/result/<입력파일명>`로 main 결과물을 추가 복사한다.
+
+## 8) 참고 실행 명령어
+
+아래 명령어는 정상 운영에서 사용자가 직접 실행해야 하는 절차가 아니라, 필요할 때 이 AI가 내부적으로 실행하거나 디버깅/복구 참고용으로 사용할 수 있는 예시다.
 
 ```bash
 cd /home/ws-mkt/voc
@@ -108,7 +118,7 @@ python3 classify_voc.py "/path/to/input.xlsx"
 ```
 
 ## 9) 검증 체크리스트
-- 단위/통합 테스트
+- 단위/통합 테스트는 이 AI가 실행하고 결과를 보고한다.
 
 ```bash
 cd /home/ws-mkt/voc
@@ -123,11 +133,13 @@ python3 -m pytest test_classify_voc.py -v
   - 기존 rule / title / article 흐름이 회귀 없이 유지되는지
 
 - 기대 결과
-  - 테스트 전체 통과
+  - 현재 테스트 전체 통과
   - `Windows Excel Validation Gate` (GitHub Workflow) 통과
-    - `artifact_path` 직접 지정 또는 `artifact_name`/`search_root` 기반 아티팩트 자동 탐색으로 검증 대상 파일을 찾을 수 있어야 함
+    - 운영 산출물은 기본적으로 `output/<입력파일명>`을 사용한다.
+    - QA/수동 검증 산출물은 `artifact_path` 직접 지정 또는 `artifact_name`/`search_root` 기반 탐색 시 `output/qa/<artifact_name>/<입력파일명>` 규칙으로 분리할 수 있어야 한다.
+    - OMV mirror는 workflow 절차상 추가 복사본이며 runtime writer와 혼동하지 않아야 한다.
     - Excel COM 일반 오픈 실패 후 Repair 모드 성공, 또는 새 repair 로그/임시 증거 파일 생성 시 게이트가 실패해야 함
-  - 출력 파일이 `output/`에 생성
+  - 지원된 workbook만 출력 파일이 생성되고, unsupported variant는 `hard_fail`로 저장이 중단됨
   - 원본 입력 파일은 변경되지 않음
   - `2026 list`와 링크된 카드 영역의 분류값이 일치함
 
