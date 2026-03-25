@@ -28,8 +28,11 @@ def load_runtime_module() -> ModuleType:
 
 
 class HasLabel(Protocol):
+    key: str
     label: str
     required: bool
+    prompt: str
+    multiline: bool
 
 
 RUNTIME_MODULE = load_runtime_module()
@@ -53,7 +56,7 @@ FORBIDDEN_PATTERNS = (
     "<link",
     "class=",
 )
-Scenario = Literal["filename", "required-only", "full-input"]
+Scenario = Literal["question-flow", "filename", "required-only", "full-input"]
 MissingField = Literal["title", "period", "point_usage_deadline", "notices"]
 
 
@@ -126,6 +129,23 @@ def create_event_page(payload: Mapping[str, object], output_dir: Path) -> Path:
         Callable[..., Path], getattr(RUNTIME_MODULE, "write_event_page")
     )
     return runtime_write_event_page(payload, output_dir=output_dir)
+
+
+def create_event_page_from_answers(
+    answer_provider: Callable[[HasLabel], object], output_dir: Path
+) -> Path:
+    runtime_write_event_page_from_answers = cast(
+        Callable[..., Path], getattr(RUNTIME_MODULE, "write_event_page_from_answers")
+    )
+    return runtime_write_event_page_from_answers(answer_provider, output_dir=output_dir)
+
+
+def read_question_flow_payload() -> tuple[dict[str, object], ...]:
+    runtime_build_question_flow_payload = cast(
+        Callable[[], tuple[dict[str, object], ...]],
+        getattr(RUNTIME_MODULE, "build_question_flow_payload"),
+    )
+    return runtime_build_question_flow_payload()
 
 
 def read_skill_markdown() -> str:
@@ -211,6 +231,16 @@ def assert_skill_metadata_matches_documentation() -> None:
     documented_aliases = parse_trigger_aliases(skill_markdown)
     documented_questions = parse_question_labels(skill_markdown)
     documented_required_flags = parse_question_required_flags(skill_markdown)
+    question_flow_payload = read_question_flow_payload()
+
+    required_doc_fragments = (
+        "ask-question style flow",
+        "MUST NOT be used as default answers",
+        "must never be auto-applied to a real user request",
+    )
+    for fragment in required_doc_fragments:
+        if fragment not in skill_markdown:
+            fail(f"SKILL.md is missing required interaction-contract text: {fragment}")
 
     if frontmatter_aliases != list(TRIGGER_ALIASES):
         fail(
@@ -231,6 +261,22 @@ def assert_skill_metadata_matches_documentation() -> None:
         fail(
             f"Required flags do not match SKILL.md: {documented_required_flags!r} != {runtime_required_flags!r}"
         )
+
+    if len(question_flow_payload) != len(QUESTION_METADATA):
+        fail("Question flow payload length does not match QUESTION_METADATA.")
+    for item, question in zip(QUESTION_METADATA, question_flow_payload, strict=True):
+        if question.get("header") != item.label:
+            fail(f"Question payload header mismatch for {item.key}: {question!r}")
+        if question.get("question") != item.prompt:
+            fail(f"Question payload prompt mismatch for {item.key}: {question!r}")
+        if question.get("required") != item.required:
+            fail(
+                f"Question payload required flag mismatch for {item.key}: {question!r}"
+            )
+        if question.get("multiline") != item.multiline:
+            fail(
+                f"Question payload multiline flag mismatch for {item.key}: {question!r}"
+            )
 
 
 def read_created_html(path: Path) -> str:
@@ -300,6 +346,58 @@ def expect_validation_error(payload: dict[str, object], expected_message: str) -
         return str(exc)
     else:
         fail("Expected ValidationError but file creation succeeded.")
+
+
+def verify_question_flow_case() -> list[Path]:
+    clean_verify_state()
+    expected_answers: dict[str, object] = {
+        "title": "사용자 맞춤 이벤트",
+        "description": "사용자가 직접 입력한 설명입니다.",
+        "period": "2026.05.01 ~ 2026.05.15",
+        "point_usage_deadline": "2026.05.22까지",
+        "notices": "첫 번째 유의사항\n두 번째 유의사항",
+        "cta_text": "지금 참여하기",
+        "cta_link": "https://example.com/custom-event",
+    }
+    asked_keys: list[str] = []
+    asked_labels: list[str] = []
+
+    def answer_provider(question: HasLabel) -> object:
+        asked_keys.append(question.key)
+        asked_labels.append(question.label)
+        return expected_answers[question.key]
+
+    created_path = create_event_page_from_answers(answer_provider, VERIFY_OUTPUT_DIR)
+    html = read_created_html(created_path)
+
+    expected_keys = [item.key for item in QUESTION_METADATA]
+    expected_labels = [item.label for item in QUESTION_METADATA]
+    if asked_keys != expected_keys:
+        fail(
+            f"Interactive question order mismatch: {asked_keys!r} != {expected_keys!r}"
+        )
+    if asked_labels != expected_labels:
+        fail(
+            f"Interactive question label order mismatch: {asked_labels!r} != {expected_labels!r}"
+        )
+
+    assert_contains_escaped(html, cast(str, expected_answers["title"]))
+    assert_contains_escaped(html, cast(str, expected_answers["description"]))
+    assert_contains_escaped(html, cast(str, expected_answers["period"]))
+    assert_contains_escaped(html, cast(str, expected_answers["point_usage_deadline"]))
+    assert_contains_escaped(html, "첫 번째 유의사항")
+    assert_contains_escaped(html, "두 번째 유의사항")
+    assert_contains(html, 'href="https://example.com/custom-event"')
+    assert_not_contains(html, "봄 혜택 이벤트")
+    assert_not_contains(html, "봄 이벤트")
+    assert_contract_order(
+        html,
+        title=cast(str, expected_answers["title"]),
+        description=cast(str, expected_answers["description"]),
+        cta_text=cast(str, expected_answers["cta_text"]),
+    )
+    assert_no_forbidden_tags(html)
+    return [created_path]
 
 
 def verify_filename_case(invalid_title: bool) -> list[Path]:
@@ -457,7 +555,7 @@ def parse_args(argv: list[str]) -> CliArgs:
         description="Verify Jodit event-page runtime contract."
     )
     _ = parser.add_argument(
-        "scenario", choices=("filename", "required-only", "full-input")
+        "scenario", choices=("question-flow", "filename", "required-only", "full-input")
     )
     _ = parser.add_argument("--invalid-title", action="store_true")
     _ = parser.add_argument(
@@ -467,7 +565,12 @@ def parse_args(argv: list[str]) -> CliArgs:
     parsed = cast(dict[str, object], vars(parser.parse_args(argv)))
 
     scenario_value = require_str(parsed.get("scenario"), "scenario")
-    if scenario_value not in ("filename", "required-only", "full-input"):
+    if scenario_value not in (
+        "question-flow",
+        "filename",
+        "required-only",
+        "full-input",
+    ):
         fail(f"Unsupported scenario: {scenario_value}")
 
     missing_value = None
@@ -496,6 +599,8 @@ def run(args: CliArgs) -> list[Path]:
     if args.scenario != "full-input" and args.duplicate:
         fail("--duplicate is only supported with the full-input scenario.")
 
+    if args.scenario == "question-flow":
+        return verify_question_flow_case()
     if args.scenario == "filename":
         return verify_filename_case(invalid_title=args.invalid_title)
     if args.scenario == "required-only":

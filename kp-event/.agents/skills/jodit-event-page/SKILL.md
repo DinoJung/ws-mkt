@@ -14,6 +14,13 @@ triggers:
 ## Purpose
 Create a single neutral event-page HTML document for Jodit Editor input/paste. The skill asks a fixed sequence of questions, validates required answers, renders inline-styled HTML, and writes the result to `output/yymmdd_title.html` with numeric suffixes for duplicates.
 
+## Interaction Contract
+- When a supported trigger fires, ask the user for the event content first using an ask-question style flow.
+- Ask one field at a time in the documented order before generating any HTML.
+- Never auto-fill event content from fixtures, examples, or prior sample outputs.
+- Fixtures under `fixtures/*.json` are verification-only and MUST NOT be used as default answers in a user-triggered run.
+- Do not generate a file with sample titles such as `봄 이벤트` or `봄 혜택 이벤트` unless the user explicitly provided those values.
+
 ## When to Activate
 - The user asks to make an event page using Korean phrasing that matches one of the supported trigger aliases.
 - The requested output is HTML content intended for Jodit Editor.
@@ -45,30 +52,37 @@ CTA rule: if either CTA text or CTA link is blank, omit the CTA section entirely
 If a CTA is rendered, the CTA link must use `http` or `https`.
 
 ## Workflow
-### 1. Load Runtime Entry Points
+### 1. Ask Questions Interactively
+- After a supported trigger alias is detected, pause generation and collect answers from the user.
+- Use the ordered metadata in `.agents/skills/jodit-event-page/skill_runtime.py` as the single source of truth for question order.
+- Ask each field separately in ask-question form using the exact labels from `QUESTION_METADATA`.
+- For `유의사항`, allow multiline input and split line breaks into bullet items.
+- Do not substitute fixture/example values when the user has not answered yet.
+
+### 2. Load Runtime Entry Points
 - Use `.agents/skills/jodit-event-page/skill_runtime.py` as the concrete runtime implementation.
 - Use `.agents/skills/jodit-event-page/verify_event_page.py` as the reusable verification runner.
 
-### 2. Validate Answers
+### 3. Validate Answers
 - Fail before file creation if any required field is blank.
 - Trim outer whitespace from all answers before validation.
 - Treat whitespace-only title values as invalid.
 
-### 3. Build Safe Output Filename
+### 4. Build Safe Output Filename
 - Prefix with local system date in `yymmdd` format.
 - Preserve Korean characters in the title.
 - Remove filesystem-illegal characters: `/ \ : * ? " < > |`
 - Collapse repeated spaces and convert internal spaces to underscores.
 - If the base filename already exists, write `_2`, `_3`, and so on.
 
-### 4. Render Jodit-Safe HTML
+### 5. Render Jodit-Safe HTML
 - Fill `.agents/skills/jodit-event-page/template.inline.html`.
 - Use inline styles only.
 - Do not emit `<style>`, `<script>`, `<button>`, `iframe`, or form-related tags.
 - Render CTA as a styled `<a>` element only when both CTA fields are present.
 - Add `target="_blank"` and `rel="noopener noreferrer"` to CTA links.
 
-### 5. Write Output
+### 6. Write Output
 - Ensure `output/` exists before writing.
 - Write generated HTML into `output/`.
 - Never overwrite an existing file with the same base name.
@@ -82,6 +96,7 @@ If a CTA is rendered, the CTA link must use `http` or `https`.
 Use these concrete commands for implementation-time verification:
 
 ```bash
+python3 .agents/skills/jodit-event-page/verify_event_page.py question-flow
 python3 .agents/skills/jodit-event-page/verify_event_page.py filename
 python3 .agents/skills/jodit-event-page/verify_event_page.py filename --invalid-title
 python3 .agents/skills/jodit-event-page/verify_event_page.py required-only
@@ -91,6 +106,8 @@ python3 .agents/skills/jodit-event-page/verify_event_page.py full-input --duplic
 ```
 
 ## Verification
+- Confirm the skill contract explicitly requires ask-question collection before HTML generation.
+- Confirm fixtures/examples are documented as verification-only, not default content.
 - Confirm the trigger alias list is documented consistently in both the frontmatter and the `## Trigger Aliases` section.
 - Confirm the question order matches the runtime question metadata.
 - Confirm the required/optional field flags match the runtime question metadata.
@@ -99,6 +116,8 @@ python3 .agents/skills/jodit-event-page/verify_event_page.py full-input --duplic
 - Confirm CTA links are rendered as anchors, not buttons.
 
 ## Examples
+Example values in this section are documentation samples only. They must never be auto-applied to a real user request.
+
 ### Required-only Example
 - Trigger: `이벤트 페이지만들자`
 - Answers:

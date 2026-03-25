@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from html import escape
@@ -27,6 +27,8 @@ class QuestionMetadata:
     key: str
     label: str
     required: bool
+    prompt: str
+    multiline: bool = False
 
 
 @dataclass(frozen=True)
@@ -53,18 +55,56 @@ TRIGGER_ALIASES: tuple[str, ...] = (
 )
 
 QUESTION_METADATA: tuple[QuestionMetadata, ...] = (
-    QuestionMetadata(order=1, key="title", label="이벤트 타이틀", required=True),
-    QuestionMetadata(order=2, key="description", label="이벤트 설명", required=False),
-    QuestionMetadata(order=3, key="period", label="이벤트 기간", required=True),
+    QuestionMetadata(
+        order=1,
+        key="title",
+        label="이벤트 타이틀",
+        required=True,
+        prompt="이벤트 타이틀을 입력해 주세요.",
+    ),
+    QuestionMetadata(
+        order=2,
+        key="description",
+        label="이벤트 설명",
+        required=False,
+        prompt="이벤트 설명을 입력해 주세요. 없으면 비워 두셔도 됩니다.",
+    ),
+    QuestionMetadata(
+        order=3,
+        key="period",
+        label="이벤트 기간",
+        required=True,
+        prompt="이벤트 기간을 입력해 주세요.",
+    ),
     QuestionMetadata(
         order=4,
         key="point_usage_deadline",
         label="이벤트 포인트 사용기한",
         required=True,
+        prompt="이벤트 포인트 사용기한을 입력해 주세요.",
     ),
-    QuestionMetadata(order=5, key="notices", label="유의사항", required=True),
-    QuestionMetadata(order=6, key="cta_text", label="CTA 문구", required=False),
-    QuestionMetadata(order=7, key="cta_link", label="CTA 링크", required=False),
+    QuestionMetadata(
+        order=5,
+        key="notices",
+        label="유의사항",
+        required=True,
+        prompt="유의사항을 입력해 주세요. 여러 줄이면 줄바꿈마다 항목으로 처리합니다.",
+        multiline=True,
+    ),
+    QuestionMetadata(
+        order=6,
+        key="cta_text",
+        label="CTA 문구",
+        required=False,
+        prompt="CTA 문구를 입력해 주세요. 없으면 비워 두셔도 됩니다.",
+    ),
+    QuestionMetadata(
+        order=7,
+        key="cta_link",
+        label="CTA 링크",
+        required=False,
+        prompt="CTA 링크를 입력해 주세요. 없으면 비워 두셔도 됩니다.",
+    ),
 )
 
 REQUIRED_FIELDS: tuple[str, ...] = (
@@ -74,6 +114,7 @@ REQUIRED_FIELDS: tuple[str, ...] = (
     "notices",
 )
 RAW_TEMPLATE_KEYS = {"notices_list_items"}
+QuestionAnswerProvider = Callable[[QuestionMetadata], object]
 
 
 def load_json_payload(json_path: str | Path) -> dict[str, object]:
@@ -158,6 +199,53 @@ def prepare_event_page_input(payload: Mapping[str, object]) -> EventPageInput:
         notices=notices,
         cta_text=cta_text,
         cta_link=cta_link,
+    )
+
+
+def build_question_flow() -> tuple[QuestionMetadata, ...]:
+    return QUESTION_METADATA
+
+
+def build_question_flow_payload() -> tuple[dict[str, object], ...]:
+    payload: list[dict[str, object]] = []
+    for item in QUESTION_METADATA:
+        guidance = "required" if item.required else "optional"
+        payload.append(
+            {
+                "order": item.order,
+                "key": item.key,
+                "header": item.label,
+                "question": item.prompt,
+                "required": item.required,
+                "multiline": item.multiline,
+                "guidance": guidance,
+            }
+        )
+    return tuple(payload)
+
+
+def collect_event_page_answers(
+    answer_provider: QuestionAnswerProvider,
+) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for item in QUESTION_METADATA:
+        answer = answer_provider(item)
+        if item.key == "notices":
+            payload[item.key] = list(normalize_notices(answer))
+            continue
+        payload[item.key] = normalize_text(answer)
+    return payload
+
+
+def write_event_page_from_answers(
+    answer_provider: QuestionAnswerProvider,
+    output_dir: str | Path | None = None,
+    template_path: str | Path = TEMPLATE_PATH,
+    today: date | None = None,
+) -> Path:
+    payload = collect_event_page_answers(answer_provider)
+    return write_event_page(
+        payload, output_dir=output_dir, template_path=template_path, today=today
     )
 
 
@@ -305,9 +393,12 @@ __all__ = [
     "TEMPLATE_PATH",
     "TRIGGER_ALIASES",
     "ValidationError",
+    "build_question_flow",
+    "build_question_flow_payload",
     "build_output_path",
     "build_render_context",
     "build_notices_list_items",
+    "collect_event_page_answers",
     "current_date_stamp",
     "ensure_output_dir",
     "load_json_payload",
@@ -315,5 +406,6 @@ __all__ = [
     "render_event_page_html",
     "sanitize_title_for_filename",
     "write_event_page",
+    "write_event_page_from_answers",
     "write_event_page_from_json",
 ]
