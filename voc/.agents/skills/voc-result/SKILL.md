@@ -17,7 +17,7 @@ Use this skill when the user asks this AI to complete the result-writing stage o
 
 - collecting deterministic workbook updates from classification results
 - preserving the original input workbook in-place
-- writing the production result workbook to `output/<input_filename>` through the preservation writer
+- writing the production result workbook to `output/<yymmdd_main_input_filename>` through the preservation writer
 - keeping QA artifact paths separate under `output/qa/<artifact_name>/<input_filename>`
 - reporting where the production result lives and whether any OMV mirror copy was performed as a procedural follow-up
 
@@ -49,13 +49,13 @@ When the user asks for a real output workbook, the runtime path is:
 3. `select_output_writer(...)` validates workbook-family support and writable-surface rules
 4. `_write_workbook_value_only_copy(...)` copies the source `.xlsx` archive and patches only allowed worksheet values
 
-This means the authoritative production output is the preserved copy at `output/<input_filename>`, not a legacy `wb.save(output_path)` write.
+This means the authoritative production output is the preserved copy at `output/<yymmdd_main_input_filename>`, not a legacy `wb.save(output_path)` write.
 
 ### Output Boundaries
 - **Input file**: original `.xlsx`, never overwritten in place
-- **Production output**: `output/<input_filename>`
+- **Production output**: `output/<yymmdd_main_input_filename>`
 - **QA artifact output**: `output/qa/<artifact_name>/<input_filename>`
-- **OMV mirror**: `/mnt/omv/.j2nu/ws-mkt/voc/result/<input_filename>` only when this AI performs the extra procedural copy after the production output exists
+- **OMV mirror**: `/mnt/omv/.workspace/ws-mkt/voc/result/<input_filename>` only when this AI performs the extra procedural copy after the production output exists
 
 Important boundary: OMV mirroring is currently a workflow/procedure step performed by this AI after output creation. It is not yet an automatic runtime write inside `classify_voc.py`.
 
@@ -73,12 +73,12 @@ To confirm result writing completed successfully, this AI should verify all appl
 
 ```bash
 # Production output exists
-test -f output/input_filename.xlsx && echo "Production output created" || echo "FAIL"
+test -f output/$(date +%y%m%d)_main_input_filename.xlsx && echo "Production output created" || echo "FAIL"
 
 # Output workbook is readable and contains written classifications
 python3 -c "
 import openpyxl
-wb = openpyxl.load_workbook('output/input_filename.xlsx')
+wb = openpyxl.load_workbook('output/250326_main_input_filename.xlsx')
 ws = wb['2026 list']
 classified_count = sum(1 for r in range(5, 221) if ws.cell(r, 7).value and ws.cell(r, 7).value != '반응_제품반응')
 print(f'Classifications written: {classified_count}')

@@ -21,7 +21,7 @@ Use this skill when the user asks this AI to run the VOC pipeline end-to-end. Th
 2. This AI **loads the environment and validates dependencies**.
 3. This AI **runs dry-run** to confirm target-row discovery.
 4. This AI **runs full classification** with the existing hybrid rule+LLM+image fallback flow.
-5. This AI **stores the main result workbook** under `output/` and then mirrors that same main artifact to `/mnt/omv/.j2nu/ws-mkt/voc/result/`.
+5. This AI **stores the main result workbook** under `output/` and then mirrors that same main artifact to `/mnt/omv/.workspace/ws-mkt/voc/result/`.
 6. This AI **verifies outputs and test results** and reports back what happened.
 
 This skill coordinates all four sub-skills (`voc-data-load`, `voc-classify`, `voc-result`, `voc-test`) into a single AI-executed workflow after the user's request.
@@ -88,18 +88,21 @@ python3 classify_voc.py [--output-dir output/]
 
 **Sub-skill:** `voc-result`
 
-After the main workbook is written to `output/`, this AI copies that exact production result workbook to the OMV result directory with the same basename.
+After the main workbook is written to `output/`, this AI copies that exact dated production result workbook to the OMV result directory with the same basename.
 
 Reference command executed by this AI:
 
 ```bash
-INPUT_NAME="$(basename "$(ls input/*.xlsx)")"
-RESULT_DIR="/mnt/omv/.j2nu/ws-mkt/voc/result"
+INPUT_PATH="$(ls input/*.xlsx)"
+INPUT_NAME="$(basename "$INPUT_PATH")"
+STAMP="$(date +%y%m%d)"
+OUTPUT_NAME="${STAMP}_main_${INPUT_NAME}"
+RESULT_DIR="/mnt/omv/.workspace/ws-mkt/voc/result"
 mkdir -p "$RESULT_DIR"
-cp "output/$INPUT_NAME" "$RESULT_DIR/$INPUT_NAME"
+cp "output/$OUTPUT_NAME" "$RESULT_DIR/$OUTPUT_NAME"
 ```
 
-This keeps the repo-local output contract (`output/<input-filename>`) while also ensuring the final main artifact is available in the shared OMV destination. This is currently a procedural step performed by this AI, not a runtime auto-mirror built into `classify_voc.py`.
+This keeps the repo-local output contract (`output/<yymmdd_main_input-filename>`) while also ensuring the final main artifact is available in the shared OMV destination. This is currently a procedural step performed by this AI, not a runtime auto-mirror built into `classify_voc.py`.
 
 ### Step 5: Verify Output
 
@@ -111,10 +114,10 @@ Reference commands executed by this AI:
 
 ```bash
 ls -la output/
-ls -la /mnt/omv/.j2nu/ws-mkt/voc/result/
+ls -la /mnt/omv/.workspace/ws-mkt/voc/result/
 ```
 
-Expected: the same main workbook filename exists in both locations, with `output/<input-filename>` as the primary repo-local artifact and `/mnt/omv/.j2nu/ws-mkt/voc/result/<input-filename>` as the mirrored copy.
+Expected: the same main workbook filename exists in both locations, with `output/<yymmdd_main_input-filename>` as the primary repo-local artifact and `/mnt/omv/.workspace/ws-mkt/voc/result/<yymmdd_main_input-filename>` as the mirrored copy.
 
 ### Step 6: Regression Testing
 
@@ -149,10 +152,13 @@ python3 classify_voc.py --dry-run
 python3 classify_voc.py
 
 # Step 5: Mirror final main output to OMV result
-INPUT_FILE="$(basename "$(ls input/*.xlsx)")"
-RESULT_DIR="/mnt/omv/.j2nu/ws-mkt/voc/result"
+INPUT_PATH="$(ls input/*.xlsx)"
+INPUT_FILE="$(basename "$INPUT_PATH")"
+STAMP="$(date +%y%m%d)"
+OUTPUT_FILE="${STAMP}_main_${INPUT_FILE}"
+RESULT_DIR="/mnt/omv/.workspace/ws-mkt/voc/result"
 mkdir -p "$RESULT_DIR"
-cp "output/$INPUT_FILE" "$RESULT_DIR/$INPUT_FILE"
+cp "output/$OUTPUT_FILE" "$RESULT_DIR/$OUTPUT_FILE"
 
 # Step 6: Verify output
 ls -la output/
@@ -168,8 +174,8 @@ python3 -m pytest test_classify_voc.py -v
 
 1. **Dry-run succeeds:** Output shows `dry-run: N target rows` with N > 0
 2. **Classification completes:** No HTTP/timeout errors; classifications applied to column 7
-3. **Main output created locally:** `output/<input-filename>` present and readable
-4. **Main output mirrored to OMV:** `/mnt/omv/.j2nu/ws-mkt/voc/result/<input-filename>` present and readable
+3. **Main output created locally:** `output/<yymmdd_main_input-filename>` present and readable
+4. **Main output mirrored to OMV:** `/mnt/omv/.workspace/ws-mkt/voc/result/<yymmdd_main_input-filename>` present and readable
 5. **All tests pass:** `pytest` returns the current suite with zero failures
 6. **No console errors:** No `GITHUB_TOKEN` undefined, no module import errors
 7. **Clear report back to the user:** this AI reports dry-run result, main output path, OMV mirror path, and verification outcome
@@ -180,7 +186,7 @@ python3 -m pytest test_classify_voc.py -v
 |-------|-----|
 | `KeyError: GITHUB_TOKEN` | Load `.env`: `set -a && . ./.env && set +a` |
 | `ModuleNotFoundError: openpyxl` | Install deps: `pip install -r requirements.txt` |
-| OMV result copy missing | Create the directory with `mkdir -p /mnt/omv/.j2nu/ws-mkt/voc/result` and re-copy the final `output/<input-filename>` workbook |
+| OMV result copy missing | Create the directory with `mkdir -p /mnt/omv/.workspace/ws-mkt/voc/result` and re-copy the final `output/<yymmdd_main_input-filename>` workbook |
 | `HTTPError: 429` | Rate limit — wait 60s and retry (see `voc-classify` skill) |
 | Tests fail | Check `test_classify_voc.py` fixtures and markers |
 
