@@ -13,7 +13,7 @@ This directory contains the VOC classification workflow for reading a source Exc
 1. Put the source workbook in `input/` or tell this AI which local `.xlsx` file to use.
 2. Ask this AI to run the VOC workflow.
 3. This AI performs dry-run, full execution, verification, and result reporting.
-4. Review the generated production workbook in `output/` using the `yymmdd_main_<input-filename>` naming rule and, when requested by workflow, the mirrored copy under `/mnt/omv/.j2nu/ws-mkt/voc/result/`.
+4. Review the generated production workbook in `output/` using the `yymmdd_main_<input-filename>` naming rule and, when requested by workflow, the mirrored copy under `/mnt/omv/.workspace/ws-mkt/voc/result/`.
 
 ## Windows Compatibility & Release Gating
 

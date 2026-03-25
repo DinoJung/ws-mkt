@@ -20,7 +20,7 @@
 - 단, 카드의 기존 분류값이 이미 `긍정_` / `부정_` prefix인 경우 그 카드는 운영 재분류 대상에서 제외한다.
 - 운영 출력 파일: `output/<yymmdd_main_입력파일명>`
 - QA/수동 검증 아티팩트: 운영 결과와 섞지 않고 `output/qa/<artifact_name>/<입력파일명>` 규칙을 사용한다.
-- OMV mirror: 사용자가 요청한 실제 운영 실행에서 이 AI가 후처리로 `/mnt/omv/.j2nu/ws-mkt/voc/result/<입력파일명>`에 동일한 main 결과물을 추가 복사할 수 있다. 이는 현재 procedural step이며 runtime writer 자체는 아니다.
+- OMV mirror: 사용자가 요청한 실제 운영 실행에서 이 AI가 후처리로 `/mnt/omv/.workspace/ws-mkt/voc/result/<입력파일명>`에 동일한 main 결과물을 추가 복사할 수 있다. 이는 현재 procedural step이며 runtime writer 자체는 아니다.
 - 출력 writer 계약:
   - 지원된 workbook family + 허용된 writable surface(`2026 list` G열, 링크 기반 카드 분류 셀)만 value-only patch writer로 저장한다.
   - 지원되지 않는 workbook variant(예: 시트 수/상태/토폴로지 drift, 허용되지 않은 셀 쓰기)는 fallback 저장 없이 즉시 hard-fail 한다.
@@ -106,7 +106,7 @@
 9. 분류 요약을 출력한다.
 10. 운영 결과를 `output/<yymmdd_main_입력파일명>`에 저장한다.
 11. 필요 시 QA 전용 복사본/검증 산출물은 `output/qa/<artifact_name>/<입력파일명>`에 저장한다.
-12. workflow가 요구하면 이 AI가 `/mnt/omv/.j2nu/ws-mkt/voc/result/<입력파일명>`로 main 결과물을 추가 복사한다.
+12. workflow가 요구하면 이 AI가 `/mnt/omv/.workspace/ws-mkt/voc/result/<입력파일명>`로 main 결과물을 추가 복사한다.
 
 ## 8) 참고 실행 명령어
 
