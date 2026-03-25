@@ -9,7 +9,7 @@
 ## 2) 입력/출력 규칙
 - 입력 파일: 원본 `.xlsx` (덮어쓰기 금지)
 - 기준 시트: `2026 list`
-- 대상 범위: row `5~220`
+- 대상 범위: row `5~220` 중 `col 7 == 반응_제품반응`인 row만 운영 분류 대상으로 사용한다. 이미 `긍정_` / `부정_` prefix가 있는 row는 재분류하지 않는다.
 - 분류 관련 컬럼:
   - 주요 내용: col `7` (`2026 list` 최종 쓰기 대상)
   - 제목: col `10` (1차 분류 입력)
@@ -17,7 +17,8 @@
 - 연결 카드 갱신 규칙:
   - `col 11` 링크와 같은 링크를 가진 카드가 workbook 내 다른 시트에 있으면 해당 카드의 `반응_제품반응`도 같은 최종 분류값으로 변경한다.
   - 동일 링크가 여러 카드에 연결되어 있으면 전부 갱신한다.
-- 운영 출력 파일: `output/<입력파일명>`
+- 단, 카드의 기존 분류값이 이미 `긍정_` / `부정_` prefix인 경우 그 카드는 운영 재분류 대상에서 제외한다.
+- 운영 출력 파일: `output/<yymmdd_main_입력파일명>`
 - QA/수동 검증 아티팩트: 운영 결과와 섞지 않고 `output/qa/<artifact_name>/<입력파일명>` 규칙을 사용한다.
 - OMV mirror: 사용자가 요청한 실제 운영 실행에서 이 AI가 후처리로 `/mnt/omv/.j2nu/ws-mkt/voc/result/<입력파일명>`에 동일한 main 결과물을 추가 복사할 수 있다. 이는 현재 procedural step이며 runtime writer 자체는 아니다.
 - 출력 writer 계약:
@@ -103,7 +104,7 @@
 7. 결과가 `반응_기타`이면 링크 본문 fetch / 본문 추출 / 공지 제거 / 본문 재분류를 수행한다.
 8. 최종 분류값을 `2026 list` col `7`과 연결 카드 영역에 반영한다.
 9. 분류 요약을 출력한다.
-10. 운영 결과를 `output/<입력파일명>`에 저장한다.
+10. 운영 결과를 `output/<yymmdd_main_입력파일명>`에 저장한다.
 11. 필요 시 QA 전용 복사본/검증 산출물은 `output/qa/<artifact_name>/<입력파일명>`에 저장한다.
 12. workflow가 요구하면 이 AI가 `/mnt/omv/.j2nu/ws-mkt/voc/result/<입력파일명>`로 main 결과물을 추가 복사한다.
 
@@ -135,7 +136,7 @@ python3 -m pytest test_classify_voc.py -v
 - 기대 결과
   - 현재 테스트 전체 통과
   - `Windows Excel Validation Gate` (GitHub Workflow) 통과
-    - 운영 산출물은 기본적으로 `output/<입력파일명>`을 사용한다.
+    - 운영 산출물은 기본적으로 `output/<yymmdd_main_입력파일명>`을 사용한다.
     - QA/수동 검증 산출물은 `artifact_path` 직접 지정 또는 `artifact_name`/`search_root` 기반 탐색 시 `output/qa/<artifact_name>/<입력파일명>` 규칙으로 분리할 수 있어야 한다.
     - OMV mirror는 workflow 절차상 추가 복사본이며 runtime writer와 혼동하지 않아야 한다.
     - Excel COM 일반 오픈 실패 후 Repair 모드 성공, 또는 새 repair 로그/임시 증거 파일 생성 시 게이트가 실패해야 함

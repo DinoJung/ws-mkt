@@ -5,6 +5,9 @@
     "filename": "2026더캐리VOC(리포트파일)_260316~260322.xlsx",
     "file_sha256": "9980706841a5b9fc75885ab3a757ec8632d0d45a9f1d4ff3a032eca90d5d3772",
     "workbook_xml_sha256": "af13370e8fdd19a8a7b598dd889f9d5092a326a300f1fd61ea844ad72cffc8e7",
+    "workbook_xml_sha256_allowlist": [
+      "bf2147688aa5d4ce4e9f5930857a49c70bae707c2962cea8c0701e561a7756ac"
+    ],
     "sheet_order": [
       "주현황보고",
       "2026 list",
@@ -72,6 +75,40 @@
       "KP": "hidden",
       "NU": "hidden"
     },
+    "sheet_states_variants": [
+      {
+        "주현황보고": "hidden",
+        "2026 list": "visible",
+        "몬치치": "visible",
+        "BP_긍정": "visible",
+        "BP_반응": "visible",
+        "BP_부정": "hidden",
+        "IB": "visible",
+        "BPU": "hidden",
+        "PK_긍정": "visible",
+        "PK_반응": "visible",
+        "PK_부정": "hidden",
+        "KR": "visible",
+        "KP": "hidden",
+        "NU": "hidden"
+      },
+      {
+        "주현황보고": "hidden",
+        "2026 list": "visible",
+        "몬치치": "hidden",
+        "BP_긍정": "visible",
+        "BP_반응": "visible",
+        "BP_부정": "hidden",
+        "IB": "visible",
+        "BPU": "hidden",
+        "PK_긍정": "visible",
+        "PK_반응": "visible",
+        "PK_부정": "hidden",
+        "KR": "visible",
+        "KP": "hidden",
+        "NU": "hidden"
+      }
+    ],
     "linked_card_sheets": [
       "몬치치",
       "BP_긍정",
@@ -286,7 +323,91 @@
         "C5",
         "AA5"
       ]
-    }
+    },
+    "linked_card_targets_variants": [
+      {
+        "BP_긍정": [
+          "C5"
+        ],
+        "BP_반응": [
+          "C5",
+          "O5",
+          "AA5",
+          "AM5",
+          "BE5",
+          "BQ5",
+          "CC5",
+          "CI5"
+        ],
+        "IB": [
+          "C5",
+          "O5"
+        ],
+        "PK_긍정": [
+          "C5",
+          "U5",
+          "AG5",
+          "AS5",
+          "BK5"
+        ],
+        "PK_반응": [
+          "C5",
+          "O5",
+          "U5",
+          "AG5",
+          "AS5",
+          "BE5",
+          "BW5",
+          "CC5",
+          "CO5",
+          "DA5",
+          "DS5",
+          "EE5",
+          "EQ5",
+          "EW5",
+          "FC5",
+          "FI5",
+          "FU5",
+          "GA5",
+          "GM5",
+          "GS5",
+          "GY5",
+          "HE5",
+          "HK5",
+          "HQ5",
+          "II5",
+          "IU5",
+          "JG5",
+          "JS5",
+          "KE5",
+          "KK5",
+          "KW5",
+          "LI5",
+          "LO5",
+          "LU5",
+          "MA5",
+          "MG5",
+          "MS5",
+          "NE5",
+          "NK5",
+          "NQ5",
+          "OC5",
+          "OI5",
+          "OO5",
+          "PA5",
+          "PG5",
+          "PM5",
+          "PS5",
+          "QE5",
+          "QK5",
+          "QQ5"
+        ],
+        "KR": [
+          "C5",
+          "O5"
+        ]
+      }
+    ]
   },
   "unsupported_conditions": [
     {

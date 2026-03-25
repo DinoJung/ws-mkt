@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -129,14 +130,22 @@ def validate_supported_workbook(
             "unsupported_sheet_order",
             "sheet order differs from supported workbook family",
         )
-    if fingerprint["sheet_states"] != dict(topology["sheet_states"]):
+    supported_sheet_states = _supported_sheet_state_variants(topology)
+    if (
+        supported_sheet_states
+        and fingerprint["sheet_states"] not in supported_sheet_states
+    ):
         raise WorkbookContractError(
             "unsupported_sheet_state",
             "sheet hidden-state map differs from supported workbook family",
         )
 
     linked_card_targets = derive_linked_card_targets(path, contract)
-    if linked_card_targets != dict(contract["writable_surface"]["linked_card_targets"]):
+    supported_linked_card_targets = _supported_linked_card_target_variants(contract)
+    if (
+        supported_linked_card_targets
+        and linked_card_targets not in supported_linked_card_targets
+    ):
         raise WorkbookContractError(
             "unsupported_missing_linked_card_layout",
             "linked-card write targets differ from supported workbook family",
@@ -172,6 +181,19 @@ def enforce_writable_surface(
                 "unsupported_write_cell",
                 f"write targets unsupported cell {sheet_name}!{cell_ref}",
             )
+
+
+def resolve_runtime_contract(
+    contract: Mapping[str, Any], fingerprint: Mapping[str, Any]
+) -> dict[str, Any]:
+    resolved = copy.deepcopy(dict(contract))
+    resolved.setdefault("preserved_topology", {})["sheet_states"] = dict(
+        fingerprint["sheet_states"]
+    )
+    resolved.setdefault("writable_surface", {})["linked_card_targets"] = dict(
+        fingerprint["linked_card_targets"]
+    )
+    return resolved
 
 
 def _workbook_sheets(workbook: ET.Element) -> list[ET.Element]:
@@ -316,3 +338,56 @@ def _supported_family_workbook_hashes(family: Mapping[str, Any]) -> set[str]:
     for item in family.get("workbook_xml_sha256_allowlist", []):
         hashes.add(str(item))
     return hashes
+
+
+def _supported_sheet_state_variants(
+    topology: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    variants = topology.get("sheet_states_variants")
+    if variants:
+        return [
+            {str(sheet_name): str(state) for sheet_name, state in variant.items()}
+            for variant in variants
+        ]
+
+    single = topology.get("sheet_states")
+    if not single:
+        return []
+    return [{str(sheet_name): str(state) for sheet_name, state in single.items()}]
+
+
+def _supported_linked_card_target_variants(
+    contract: Mapping[str, Any],
+) -> list[dict[str, list[str]]]:
+    writable_surface = contract.get("writable_surface")
+    if not isinstance(writable_surface, Mapping):
+        return []
+
+    variants: list[dict[str, list[str]]] = []
+    single = writable_surface.get("linked_card_targets")
+    if isinstance(single, Mapping):
+        variants.append(
+            {
+                str(sheet_name): _normalize_cell_ref_list(cell_refs)
+                for sheet_name, cell_refs in single.items()
+            }
+        )
+
+    allowlist = writable_surface.get("linked_card_targets_variants", [])
+    if isinstance(allowlist, Sequence):
+        for variant in allowlist:
+            if not isinstance(variant, Mapping):
+                continue
+            variants.append(
+                {
+                    str(sheet_name): _normalize_cell_ref_list(cell_refs)
+                    for sheet_name, cell_refs in variant.items()
+                }
+            )
+    return variants
+
+
+def _normalize_cell_ref_list(cell_refs: object) -> list[str]:
+    if isinstance(cell_refs, Sequence) and not isinstance(cell_refs, (str, bytes)):
+        return [str(cell_ref) for cell_ref in cell_refs]
+    return []

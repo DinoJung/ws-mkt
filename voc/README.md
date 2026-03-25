@@ -5,7 +5,7 @@ This directory contains the VOC classification workflow for reading a source Exc
 ## Directory roles
 
 - `input/`: place source `.xlsx` workbooks here for local runs. These files are treated as raw inputs and are now git-ignored so source data is not added to the repository by mistake.
-- `output/`: generated result workbooks are written here. These files are produced by the pipeline, represent processed copies of the input workbook, and are git-ignored so generated artifacts stay out of the repository.
+- `output/`: generated result workbooks are written here. Production outputs follow `yymmdd_main_<input-filename>.xlsx`, and these generated artifacts are git-ignored so they stay out of the repository.
 - `docs/`: workflow notes and classification logic reference documents.
 
 ## Basic run flow
@@ -13,7 +13,7 @@ This directory contains the VOC classification workflow for reading a source Exc
 1. Put the source workbook in `input/` or tell this AI which local `.xlsx` file to use.
 2. Ask this AI to run the VOC workflow.
 3. This AI performs dry-run, full execution, verification, and result reporting.
-4. Review the generated production workbook in `output/` and, when requested by workflow, the mirrored copy under `/mnt/omv/.j2nu/ws-mkt/voc/result/`.
+4. Review the generated production workbook in `output/` using the `yymmdd_main_<input-filename>` naming rule and, when requested by workflow, the mirrored copy under `/mnt/omv/.j2nu/ws-mkt/voc/result/`.
 
 ## Windows Compatibility & Release Gating
 

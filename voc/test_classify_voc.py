@@ -194,6 +194,30 @@ def _supported_workbook_contract():
     return importlib.import_module("xlsx_template_contract").load_template_contract()
 
 
+def _contract_workbook_hashes(contract):
+    family = contract["supported_workbook_family"]
+    hashes = set()
+    if family.get("workbook_xml_sha256"):
+        hashes.add(family["workbook_xml_sha256"])
+    hashes.update(family.get("workbook_xml_sha256_allowlist", []))
+    return hashes
+
+
+def _contract_sheet_state_variants(contract):
+    topology = contract["preserved_topology"]
+    variants = topology.get("sheet_states_variants")
+    if variants:
+        return variants
+    return [topology["sheet_states"]]
+
+
+def _contract_linked_card_target_variants(contract):
+    writable_surface = contract["writable_surface"]
+    variants = [writable_surface["linked_card_targets"]]
+    variants.extend(writable_surface.get("linked_card_targets_variants", []))
+    return variants
+
+
 def _xlsx_package_diff_validator_cmd(template: Path, output: Path) -> list[str]:
     repo_root = Path(__file__).resolve().parent
     return [
@@ -570,14 +594,16 @@ class TestVocClassifier(unittest.TestCase):
         assert 'mc:Ignorable="x14ac"' in patched_text
         assert 'x14ac:dyDescent="0.3"' in patched_text
 
-    def test_build_output_workbook_path_preserves_production_name(self):
+    def test_build_output_workbook_path_uses_dated_main_prefix(self):
         import classify_voc
 
         output_path = classify_voc.build_output_workbook_path(
-            Path("input/source.xlsx"), Path("output")
+            Path("input/source.xlsx"),
+            Path("output"),
+            run_date=__import__("datetime").datetime(2026, 3, 25),
         )
 
-        assert output_path == Path("output/source.xlsx")
+        assert output_path == Path("output/260325_main_source.xlsx")
 
     def test_build_qa_artifact_workbook_path_uses_output_qa_subtree(self):
         import classify_voc
@@ -772,10 +798,23 @@ class TestVocClassifier(unittest.TestCase):
 
         rows = classify_voc.read_target_rows(wb)
 
-        assert len(rows) == 2
+        assert len(rows) == 1
         assert rows[0]["row"] == 5
         assert rows[0]["title"] == "이 제품 어디서 사나요"
-        assert any(item.get("row") == 6 for item in rows)
+        assert all(item.get("row") != 6 for item in rows)
+
+    def test_build_card_index_skips_legacy_prefixed_cards(self):
+        import classify_voc
+
+        wb, _ = _build_base_workbook()
+        reaction = wb.create_sheet("BP_반응")
+        _add_card(reaction, 2, "https://example.com/a", category="반응_제품반응")
+        _add_card(reaction, 14, "https://example.com/b", category="긍정_제품후기")
+
+        card_index = classify_voc.build_card_index(wb)
+
+        assert card_index["https://example.com/a"] == [("BP_반응", 5, 3)]
+        assert "https://example.com/b" not in card_index
 
     def test_write_classification_result(self):
         import classify_voc
@@ -1315,14 +1354,11 @@ def test_writable_surface_contract_supported_template():
     fingerprint = xlsx_template_contract.validate_supported_workbook(src, contract)
     allowed = xlsx_template_contract.expand_allowed_writable_surface(contract)
 
-    assert fingerprint["workbook_xml_sha256"] in {
-        contract["supported_workbook_family"]["workbook_xml_sha256"]
-    }
+    assert fingerprint["workbook_xml_sha256"] in _contract_workbook_hashes(contract)
     assert fingerprint["sheet_order"] == contract["preserved_topology"]["sheet_order"]
-    assert fingerprint["sheet_states"] == contract["preserved_topology"]["sheet_states"]
-    assert (
-        fingerprint["linked_card_targets"]
-        == contract["writable_surface"]["linked_card_targets"]
+    assert fingerprint["sheet_states"] in _contract_sheet_state_variants(contract)
+    assert fingerprint["linked_card_targets"] in _contract_linked_card_target_variants(
+        contract
     )
     assert len(allowed["2026 list"]) == 216
     assert (
@@ -1358,7 +1394,10 @@ def test_writable_surface_contract_rejects_sheet_state_drift():
 
     src = _real_input_workbook()
     contract = copy.deepcopy(_supported_workbook_contract())
-    contract["preserved_topology"]["sheet_states"]["주현황보고"] = "visible"
+    for variant in contract["preserved_topology"].get("sheet_states_variants", []):
+        variant["주현황보고"] = "visible"
+    if "sheet_states" in contract["preserved_topology"]:
+        contract["preserved_topology"]["sheet_states"]["주현황보고"] = "visible"
 
     with pytest.raises(xlsx_template_contract.WorkbookContractError) as excinfo:
         xlsx_template_contract.validate_supported_workbook(src, contract)
@@ -1373,8 +1412,12 @@ def test_writable_surface_contract_allows_supported_updates():
     src = _real_input_workbook()
     contract = _supported_workbook_contract()
     updates = _build_legacy_baseline_updates(src)
+    fingerprint = xlsx_template_contract.validate_supported_workbook(src, contract)
+    resolved_contract = xlsx_template_contract.resolve_runtime_contract(
+        contract, fingerprint
+    )
 
-    xlsx_template_contract.enforce_writable_surface(updates, contract)
+    xlsx_template_contract.enforce_writable_surface(updates, resolved_contract)
 
 
 def test_writable_surface_rejects_unknown_cell():

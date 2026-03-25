@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime
 import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
@@ -173,6 +174,7 @@ LOW_QUALITY_ARTICLE_TOKENS = [
     "가입카페",
 ]
 LEGACY_TARGET_PREFIXES = ("긍정_", "부정_")
+PRODUCTION_ARTIFACT_KIND = "main"
 
 NOTICE_PHRASES = ("회원간의 거래 분쟁에 대한 공론화 금지",)
 XML_NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -703,6 +705,11 @@ def build_card_index(wb) -> dict[str, list[tuple[str, int, int]]]:
                 continue
             if ws.cell(5, card_start).value != "주요 이슈":
                 continue
+            existing_category = ws.cell(5, card_start + 1).value
+            if isinstance(existing_category, str) and existing_category.startswith(
+                LEGACY_TARGET_PREFIXES
+            ):
+                continue
             index.setdefault(link, []).append((ws.title, 5, card_start + 1))
     return index
 
@@ -782,10 +789,7 @@ def read_target_rows(wb) -> list[TargetRow]:
     targets = []
     for row in range(START_ROW, END_ROW + 1):
         current_value = ws.cell(row, TARGET_COLUMN).value
-        if current_value != TARGET_MARKER and not (
-            isinstance(current_value, str)
-            and current_value.startswith(LEGACY_TARGET_PREFIXES)
-        ):
+        if current_value != TARGET_MARKER:
             continue
         title = preprocess_title(ws.cell(row, TITLE_COLUMN).value)
         if title is None:
@@ -1340,9 +1344,12 @@ def select_output_writer(
     contract_error_cls = contract_module.WorkbookContractError
 
     try:
-        contract_module.validate_supported_workbook(source_path, contract)
+        fingerprint = contract_module.validate_supported_workbook(source_path, contract)
+        resolved_contract = contract_module.resolve_runtime_contract(
+            contract, fingerprint
+        )
         contract_module.enforce_writable_surface(
-            cast(Sequence[Mapping[str, str]], updates), contract
+            cast(Sequence[Mapping[str, str]], updates), resolved_contract
         )
     except contract_error_cls as exc:
         return {
@@ -1404,7 +1411,7 @@ def save_workbook_with_preserved_media_legacy(
 
 
 def collect_classification_updates(
-    wb, api_key
+    wb, api_key, source_path: Path | None = None
 ) -> tuple[list[CellUpdate], dict[str, int]]:
     card_index = build_card_index(wb)
     targets = read_target_rows(wb)
@@ -1430,7 +1437,9 @@ def collect_classification_updates(
 
 
 def run_classification(wb, api_key, output_path, source_path: Path | None = None):
-    updates, summary = collect_classification_updates(wb, api_key)
+    updates, summary = collect_classification_updates(
+        wb, api_key, source_path=source_path
+    )
     _apply_updates_to_workbook(wb, updates)
 
     if output_path:
@@ -1456,9 +1465,20 @@ QA_ARTIFACT_SUBDIR = "qa"
 
 
 def build_output_workbook_path(
-    input_path: Path, output_dir: Path = DEFAULT_OUTPUT_DIR
+    input_path: Path,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    artifact_kind: str = PRODUCTION_ARTIFACT_KIND,
+    run_date: datetime | None = None,
 ) -> Path:
-    return Path(output_dir) / input_path.name
+    normalized_kind = artifact_kind.strip()
+    if not normalized_kind:
+        raise ValueError("artifact_kind is required for production output")
+    if normalized_kind in {".", ".."} or any(
+        separator in normalized_kind for separator in ("/", "\\")
+    ):
+        raise ValueError("artifact_kind must be a single safe path segment")
+    stamp = (run_date or datetime.now()).strftime("%y%m%d")
+    return Path(output_dir) / f"{stamp}_{normalized_kind}_{input_path.name}"
 
 
 def build_qa_artifact_workbook_path(
