@@ -1,0 +1,13 @@
+{
+  "title": "봄 혜택 이벤트",
+  "description": "따뜻한 봄 시즌을 맞아 포인트 적립과 사용 혜택을 한번에 확인할 수 있는 이벤트입니다.",
+  "period": "2026.03.25 ~ 2026.04.15",
+  "point_usage_deadline": "2026.04.22까지",
+  "notices": [
+    "ID당 1회만 참여 가능합니다.",
+    "부정 참여가 확인되면 지급 대상에서 제외됩니다.",
+    "포인트는 사용기한 이후 자동 소멸됩니다."
+  ],
+  "cta_text": "이벤트 참여하기",
+  "cta_link": "https://example.com/events/spring-benefit"
+}
